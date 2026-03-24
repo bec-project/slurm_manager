@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from uuid import uuid4
 
 from slurm_manager.job_future import JobFuture

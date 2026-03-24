@@ -5,15 +5,15 @@ its status, register callbacks for events and wait for its completion.
 The JobFuture class provides a high-level interface for interacting with Slurm jobs.
 """
 
-from typing import Callable
+import logging
 import threading
 import time
-import logging
-from uuid import uuid4
 from concurrent.futures import Future
-
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Callable
+from uuid import uuid4
+
 from slurm_manager.utils.utils import SLURM_JOB_STATE_CODES
 
 logger = logging.getLogger(__name__)

@@ -6,8 +6,7 @@ from functools import partial
 
 import fakeredis
 
-from slurm_manager.redis_pubsub_client import Message
-from slurm_manager.redis_pubsub_client import RedisPubSubClient
+from slurm_manager.redis_pubsub_client import Message, RedisPubSubClient
 
 
 def _make_client() -> RedisPubSubClient:
