@@ -6,13 +6,13 @@ from functools import partial
 
 import fakeredis
 
-from slurm_manager.redis_pubsub_client import Message, RedisPubSubClient
+from slurm_manager.redis_sub_client import Message, RedisSubClient
 
 
-def _make_client() -> RedisPubSubClient:
+def _make_client() -> RedisSubClient:
     server = fakeredis.FakeServer()
     redis_cls = partial(fakeredis.FakeRedis, server=server, decode_responses=True)
-    return RedisPubSubClient(bootstrap="localhost:6379", redis_cls=redis_cls)
+    return RedisSubClient(bootstrap="localhost:6379", redis_cls=redis_cls)
 
 
 def test_subscribe_dispatch_unsubscribe_cycle():

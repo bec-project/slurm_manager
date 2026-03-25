@@ -6,20 +6,22 @@ subscribe to topics and dispatch received messages to registered callbacks.
 
 from __future__ import annotations
 
-import json
 import logging
-import queue
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
 
 from redis.client import Redis
+from redis.exceptions import RedisError
+
+from slurm_manager.event_messages import SlurmMessage, parse_slurm_message
 
 logger = logging.getLogger(__name__)
 
-MessageCallback = Callable[[dict[str, Any]], None]
-_STOP = object()
+
+MessageCallback = Callable[[SlurmMessage], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,18 +33,15 @@ class Subscription:
     callback: MessageCallback
 
 
-@dataclass
-class Message:
-    topic: str
-    payload: Any
-    raw: dict[str, Any]
+class RedisSubClient:
+    """
 
+    Simple subscribe client to a Redis instance.
 
-class RedisPubSubClient:
-    """Simple pub/sub wrapper around redis-py.
-
-    The client maintains a single pub/sub connection and two background threads:
-    one listener (I/O polling) and one dispatcher (callback execution).
+    The client maintains a single listener thread that polls for new messages
+    and executes callbacks registered for the topic of each message.
+    Callbacks are executed in the listener thread, so they should be fast and
+    non-blocking to avoid any delays in message processing.
     """
 
     def __init__(
@@ -65,12 +64,8 @@ class RedisPubSubClient:
         self._subscriptions_by_topic: dict[str, dict[str, Subscription]] = {}
         self._topic_by_subscription_id: dict[str, str] = {}
 
-        self._message_queue: queue.Queue[Message | object] = queue.Queue()
         self._stop_listener = threading.Event()
-        self._stop_dispatcher = threading.Event()
-
         self._listener_thread: threading.Thread | None = None
-        self._dispatcher_thread: threading.Thread | None = None
 
     @property
     def registered_topics(self) -> set[str]:
@@ -96,23 +91,25 @@ class RedisPubSubClient:
         return sub_id
 
     def unsubscribe(self, subscription_id: str) -> bool:
-        """Unregisters one callback by subscription id.
+        """
+        Unregisters one callback by subscription id.
 
         Returns True if a callback was removed, False otherwise.
         """
         with self._lock:
             topic = self._topic_by_subscription_id.pop(subscription_id, None)
-            if topic is None:
+            if topic is None:  # Topic not found
                 return False
 
             callbacks = self._subscriptions_by_topic.get(topic)
-            if callbacks is None:
+            if callbacks is None:  # No callbacks for topic, should technically be impossible
                 return False
 
             callbacks.pop(subscription_id, None)
-            if callbacks:
+            if callbacks:  # There are still callbacks for this topic, so we keep the subscription
                 return True
 
+            # No more callbacks for this topic, we can unsubscribe from Redis and clean up
             self._subscriptions_by_topic.pop(topic, None)
             self._pubsub.unsubscribe(topic)
             return True
@@ -121,26 +118,20 @@ class RedisPubSubClient:
         """Unregisters all callbacks for a topic and returns removed count."""
         with self._lock:
             callbacks = self._subscriptions_by_topic.pop(topic, None)
-            if not callbacks:
+            if not callbacks:  # No callbacks for this topic, nothing happens
                 return 0
-            for sub_id in callbacks:
+            for sub_id in callbacks:  # Clean up subscription id mapping
                 self._topic_by_subscription_id.pop(sub_id, None)
-            self._pubsub.unsubscribe(topic)
+            self._pubsub.unsubscribe(topic)  # Unsubscribe from Redis
             return len(callbacks)
 
     def shutdown(self, timeout: float | None = 1.0) -> None:
         """Stops worker threads and closes Redis resources."""
         self._stop_listener.set()
-        self._stop_dispatcher.set()
-        self._message_queue.put(_STOP)
 
         if self._listener_thread is not None:
             self._listener_thread.join(timeout=timeout)
             self._listener_thread = None
-
-        if self._dispatcher_thread is not None:
-            self._dispatcher_thread.join(timeout=timeout)
-            self._dispatcher_thread = None
 
         with self._lock:
             self._subscriptions_by_topic.clear()
@@ -150,6 +141,7 @@ class RedisPubSubClient:
         self._redis.close()
 
     def _ensure_threads_started(self) -> None:
+        """Makes sure the listener thread is running to receive messages from Redis."""
         if self._listener_thread is None or not self._listener_thread.is_alive():
             self._stop_listener.clear()
             self._listener_thread = threading.Thread(
@@ -157,52 +149,38 @@ class RedisPubSubClient:
             )
             self._listener_thread.start()
 
-        if self._dispatcher_thread is None or not self._dispatcher_thread.is_alive():
-            self._stop_dispatcher.clear()
-            self._dispatcher_thread = threading.Thread(
-                target=self._dispatcher_loop, name="redis-pubsub-dispatcher", daemon=True
-            )
-            self._dispatcher_thread.start()
-
     def _listener_loop(self) -> None:
+        """Listener thread loop that polls for messages and dispatches them to callbacks."""
         while not self._stop_listener.is_set():
             try:
-                message = self._pubsub.get_message(timeout=0.2)
-            except redis.exceptions.RedisError:
-                logger.exception("Error while polling redis pub/sub")
+                raw_message = self._pubsub.get_message(timeout=0.2)
+            except RedisError:
+                logger.error("Error while polling redis pub/sub")
                 self._stop_listener.wait(0.5)
                 continue
 
-            if message is None:
+            if raw_message is None:
                 continue
 
-            normalized = self._normalize_message(message)
-            self._message_queue.put(normalized)
-
-    def _dispatcher_loop(self) -> None:
-        while not self._stop_dispatcher.is_set():
-            item = self._message_queue.get()
-            if item is _STOP:
-                break
-
-            message = item
-            if not isinstance(message, Message):
+            try:
+                topic, message = self._normalize_message(raw_message)
+            except (ValueError, TypeError) as exc:
+                logger.error("Failed to normalize redis message: %s", exc)
                 continue
 
-            topic = message.topic
             with self._lock:
                 callbacks = list(self._subscriptions_by_topic.get(topic, {}).values())
-
             for subscription in callbacks:
                 try:
                     subscription.callback(message)
                 except Exception:
-                    logger.exception(
-                        "Error in callback for topic '%s' (subscription %s)", topic, subscription.id
+                    logger.error(
+                        "Error in callback for topic %s (subscription %s)", topic, subscription.id
                     )
 
     @staticmethod
-    def _normalize_message(message: dict[str, Any]) -> Message:
+    def _normalize_message(message: dict[str, Any]) -> tuple[str, SlurmMessage]:
+        """Converts raw Redis message dict to normalized Message object."""
         channel = message.get("channel")
         topic = channel.decode() if isinstance(channel, bytes) else str(channel)
 
@@ -210,13 +188,9 @@ class RedisPubSubClient:
         if isinstance(data, bytes):
             data = data.decode()
 
-        payload: Any
-        if isinstance(data, str):
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError:
-                payload = data
-        else:
-            payload = data
+        if not isinstance(data, (str, dict)):
+            raise TypeError(f"Unsupported redis message payload type: {type(data).__name__}")
 
-        return Message(topic=topic, payload=payload, raw=message)
+        payload = parse_slurm_message(data)
+
+        return topic, payload
