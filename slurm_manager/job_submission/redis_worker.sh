@@ -8,13 +8,50 @@ hash_name=$2
 
 exec {fifo_fd}<"$fifo"
 
+redis_host="bec-slurm.psi.ch"
 status="finished"
 
-redis-cli -h bec-slurm.psi.ch PUBLISH "info/$hash_name/event" start
+json_escape() {
+  local value=${1-}
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\f'/\\f}
+  value=${value//$'\b'/\\b}
+  printf '%s' "$value"
+}
+
+build_heartbeat_payload() {
+  local timestamp=$1
+  printf '{"msg_type":"heartbeat","timestamp":%s}' "$timestamp"
+}
+
+build_status_payload() {
+  local status_value=$1
+  printf '{"msg_type":"status","status":"%s"}' "$(json_escape "$status_value")"
+}
+
+build_log_payload() {
+  local log_value=$1
+  printf '{"msg_type":"log","log":"%s"}' "$(json_escape "$log_value")"
+}
+
+publish_payload() {
+  local topic=$1
+  local payload=$2
+  redis-cli -h "$redis_host" PUBLISH "$topic" "$payload"
+}
+
+timestamp=$(date +%s)
+publish_payload "info/$hash_name/status" "$(build_status_payload "running")"
 
 heartbeat() {
   while :; do
-      redis-cli -h bec-slurm.psi.ch PUBLISH "info/$hash_name/heartbeat" "$(date +%s)" || true
+      local timestamp
+      timestamp=$(date +%s)
+      publish_payload "info/$hash_name/heartbeat" "$(build_heartbeat_payload "$timestamp")" || true
       sleep 1
   done
 }
@@ -42,7 +79,7 @@ while IFS= read -r line <&"$fifo_fd"; do
         ;;
       log:*)
         msg="${line#log:}"
-        redis-cli -h bec-slurm.psi.ch PUBLISH "info/$hash_name/log" "$msg"
+        publish_payload "info/$hash_name/log" "$(build_log_payload "$msg")"
         ;;
       *)
         :
@@ -50,4 +87,4 @@ while IFS= read -r line <&"$fifo_fd"; do
   esac
 done
 
-redis-cli -h bec-slurm.psi.ch PUBLISH "info/$hash_name/event" "$status"
+publish_payload "info/$hash_name/status" "$(build_status_payload "$status")"

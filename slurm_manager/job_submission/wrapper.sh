@@ -7,12 +7,13 @@ script_path=$2
 hash_name=$3
 have_out_stream=$4
 have_out_file=$5
+redis_script=$6
 
 
 fifo=$(mktemp -u)
 mkfifo "$fifo"
 
-./redis_worker.sh "$fifo" "$hash_name" >/dev/null &
+"$redis_script" "$fifo" "$hash_name" >/dev/null &
 worker_pid=$!
 
 trap 'rm -f "$fifo"' EXIT
