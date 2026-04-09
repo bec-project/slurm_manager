@@ -132,7 +132,8 @@ class RedisSubClient:
 
         if self._listener_thread is not None:
             self._listener_thread.join(timeout=timeout)
-            self._listener_thread = None
+            if self._listener_thread.is_alive():
+                logger.warning("Listener thread did not stop within timeout")
 
         with self._lock:
             self._subscriptions_by_topic.clear()
