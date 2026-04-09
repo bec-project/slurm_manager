@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import queue
 import subprocess
 import threading
 import time
@@ -15,8 +14,10 @@ from datetime import datetime
 from functools import partial, wraps
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict
 
 from slurm_manager.event_messages import HeartBeatMessage, SlurmMessage, StatusMessage
 from slurm_manager.job_future import JobFuture, JobStatus
@@ -54,15 +55,17 @@ class TopicInfo:
         return self.topic("heartbeat")
 
 
-class JobInfo(TypedDict):
+class SubscriptionInfo(BaseModel):
     """Helper for slurm job information and future tracking."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     job_id: str
     topic: str
     callback: Callable[[SlurmMessage], None] | None = None
     callback_id: str | None = None
     last_heartbeat: float | None = None
-    _heartbeat_received: bool = False
+    heartbeat_received: bool = False
 
 
 HEARTBEAT_TIMEOUT = 10  # seconds
@@ -80,8 +83,8 @@ class SlurmManager:
 
         # This is a job_id mapping to job futures
         self._future_registry: dict[str, JobFuture] = {}
-        # This subscription id job_info mapping by topics, used for callback handling
-        self._subscriptions_by_topic: dict[str, dict[str, JobInfo]] = defaultdict(dict)
+        # This subscription id sub_info mapping by topics, used for callback handling
+        self._subscriptions_by_topic: dict[str, dict[str, SubscriptionInfo]] = defaultdict(dict)
         # This is a topic mapping to subscriptions
         self._topic_by_subscription_id: dict[str, str] = {}
         # This is a job_id mapping to topics
@@ -114,35 +117,34 @@ class SlurmManager:
                 for _, topics in self._active_subscriptions.items():
                     for topic in topics:
                         infos = self._subscriptions_by_topic.get(topic, {})
-                        for job_info in infos.values():
-                            if job_info and job_info["last_heartbeat"]:
-                                if (
-                                    time.monotonic() - job_info["last_heartbeat"]
-                                    > HEARTBEAT_TIMEOUT
-                                ):
-                                    missing_heartbeats.append(job_info)
+                        for sub_info in infos.values():
+                            if sub_info and sub_info.last_heartbeat:
+                                if time.monotonic() - sub_info.last_heartbeat > HEARTBEAT_TIMEOUT:
+                                    missing_heartbeats.append(sub_info)
 
-            for job_info in missing_heartbeats:
-                self._check_slurm_job(job_info)
+            for sub_info in missing_heartbeats:
+                self._check_slurm_job(sub_info)
 
-    def _check_slurm_job(self, job_info: JobInfo) -> None:
+    def _check_slurm_job(self, sub_info: SubscriptionInfo) -> None:
         """Check if a SLURM job is active"""
         # TODO check if job is Pending through SLURM Rest API..
         # Currently we just trigger a cleanup if heartbea is missing.
-        future = self._future_registry.get(job_info["job_id"])
+        future = self._future_registry.get(sub_info.job_id)
         if not future:
             return
-        cancel_msg = f"error:No heartbeat received within {HEARTBEAT_TIMEOUT}s for topic {job_info['topic']}."
-        if job_info["_heartbeat_received"] is True:
-            cancel_msg += f" Last heartbeat from job at {datetime.fromtimestamp(job_info['last_heartbeat']).isoformat()}."
+        cancel_msg = (
+            f"error:No heartbeat received within {HEARTBEAT_TIMEOUT}s for topic {sub_info.topic}."
+        )
+        if sub_info.heartbeat_received is True:
+            cancel_msg += (
+                " Last heartbeat from job at "
+                f"{datetime.fromtimestamp(sub_info.last_heartbeat).isoformat()}."
+            )
 
         self._event_callback(
             StatusMessage(
                 status=cancel_msg,
-                metadata={
-                    "timestamp_received": str(time.monotonic()),
-                    "job_id": job_info["job_id"],
-                },
+                metadata={"timestamp_received": str(time.monotonic()), "job_id": sub_info.job_id},
             ),
             future=future,
         )
@@ -243,9 +245,9 @@ class SlurmManager:
                 topic = self._topic_by_subscription_id.pop(cb_id, None)
                 if topic is not None:
                     callbacks = self._subscriptions_by_topic.get(topic, {})
-                    job_info = callbacks.pop(cb_id, None)
-                    if job_info:
-                        job_id = job_info["job_id"]
+                    sub_info = callbacks.pop(cb_id, None)
+                    if sub_info:
+                        job_id = sub_info.job_id
                         self._active_subscriptions[job_id].discard(topic)
 
                     # If no more callbacks for the topic, remove the topic subscription
@@ -257,9 +259,9 @@ class SlurmManager:
         """Remove a subscription by its topic."""
         with self._lock:
             callbacks = self._subscriptions_by_topic.pop(topic, {})
-            for callback_id, job_info in callbacks.items():
+            for callback_id, sub_info in callbacks.items():
                 self._topic_by_subscription_id.pop(callback_id, None)
-                job_id = job_info["job_id"]
+                job_id = sub_info.job_id
                 self._active_subscriptions[job_id].discard(topic)
 
             # Remove the topic subscription from Redis
@@ -310,7 +312,7 @@ class SlurmManager:
             self._subscriptions_by_topic.clear()
             self._topic_by_subscription_id.clear()
 
-        self.sub_client.shutdown()
+        self.sub_client.shutdown(timeout=timeout)
         self.executor.shutdown(wait=True, cancel_futures=True)
 
     ###################
@@ -352,15 +354,15 @@ class SlurmManager:
             partial(wrapped_callback, executor=self.executor, callback_kwargs=callback_kwargs),
         )
 
-        job_info = JobInfo(
+        sub_info = SubscriptionInfo(
             job_id=job_id,
             topic=topic_str,
             callback=wrapped_callback,
             last_heartbeat=None,
             callback_id=cb_id,
-            _heartbeat_received=False,
+            heartbeat_received=False,
         )
-        self._register_subscription_for_job(job_info=job_info)
+        self._register_subscription_for_job(sub_info=sub_info)
         return cb_id
 
     def _remove_job_future(self, job_id: str) -> None:
@@ -376,61 +378,63 @@ class SlurmManager:
         self._subscribe_to_event(topic_info, future)
 
     def _subscribe_to_heartbeat(self, topic_info: TopicInfo) -> None:
-        job_info = JobInfo(
+        sub_info = SubscriptionInfo(
             job_id=topic_info.job_id,
             topic=topic_info.heartbeat,
             callback=None,
             last_heartbeat=None,
             callback_id=None,
-            _heartbeat_received=False,
+            heartbeat_received=False,
         )
         topic = topic_info.heartbeat
 
-        def wrapped_callback(message: HeartBeatMessage, job_info: JobInfo) -> None:
+        def wrapped_callback(message: HeartBeatMessage, sub_info: SubscriptionInfo) -> None:
             try:
                 message.metadata.update()
-                self._heartbeat_callback(message, job_info)
+                self._heartbeat_callback(message, sub_info)
             except Exception:
                 logger.error("Error in callback for topic %s: %s", message.topic, message.payload)
 
-        cb_id = self.sub_client.subscribe(topic, partial(wrapped_callback, job_info=job_info))
-        job_info["callback_id"] = cb_id
-        job_info["last_heartbeat"] = time.monotonic()
-        self._register_subscription_for_job(job_info=job_info)
+        cb_id = self.sub_client.subscribe(topic, partial(wrapped_callback, sub_info=sub_info))
+        sub_info.callback_id = cb_id
+        sub_info.last_heartbeat = time.monotonic()
+        self._register_subscription_for_job(sub_info=sub_info)
 
-    def _heartbeat_callback(self, message: HeartBeatMessage, job_info: JobInfo) -> None:
-        job_info["_heartbeat_received"] = True
-        job_info["last_heartbeat"] = time.monotonic()
+    def _heartbeat_callback(self, message: HeartBeatMessage, sub_info: SubscriptionInfo) -> None:
+        sub_info.heartbeat_received = True
+        sub_info.last_heartbeat = time.monotonic()
 
     def _subscribe_to_event(self, topic_info: TopicInfo, future: JobFuture) -> None:
-        job_info = JobInfo(
+        sub_info = SubscriptionInfo(
             job_id=topic_info.job_id,
             topic=topic_info.event,
             callback=None,
             last_heartbeat=None,
             callback_id=None,
-            _heartbeat_received=False,
+            heartbeat_received=False,
         )
         event_topic = topic_info.event
 
         def wrapped_callback(message: StatusMessage, future: JobFuture) -> None:
             try:
                 message.metadata.update(
-                    {"timestamp_received": str(time.monotonic()), "job_id": job_info["job_id"]}
+                    {"timestamp_received": str(time.monotonic()), "job_id": sub_info.job_id}
                 )
                 self._event_callback(message, future=future)
             except Exception:
                 logger.error("Error in callback for topic %s: %s", message.topic, message.payload)
 
         cb_id = self.sub_client.subscribe(event_topic, partial(wrapped_callback, future=future))
-        job_info["callback_id"] = cb_id
-        self._register_subscription_for_job(job_info=job_info)
+        sub_info.callback_id = cb_id
+        self._register_subscription_for_job(sub_info=sub_info)
 
-    def _register_subscription_for_job(self, job_info: JobInfo) -> None:
+    def _register_subscription_for_job(self, sub_info: SubscriptionInfo) -> None:
         with self._lock:
-            self._subscriptions_by_topic[job_info["topic"]][job_info["callback_id"]] = job_info
-            self._topic_by_subscription_id[job_info["callback_id"]] = job_info["topic"]
-            self._active_subscriptions[job_info["job_id"]].add(job_info["topic"])
+            if sub_info.callback_id is None:
+                raise ValueError("SubscriptionInfo.callback_id must be set before registration")
+            self._subscriptions_by_topic[sub_info.topic][sub_info.callback_id] = sub_info
+            self._topic_by_subscription_id[sub_info.callback_id] = sub_info.topic
+            self._active_subscriptions[sub_info.job_id].add(sub_info.topic)
 
     def _event_callback(self, message: StatusMessage, future: JobFuture) -> None:
         """
