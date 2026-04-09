@@ -60,8 +60,9 @@ class SubscriptionInfo(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    job_id: str
     topic: str
+    job_id: str
+    slurm_job_id: str | None = None
     callback: Callable[[SlurmMessage], None] | None = None
     callback_id: str | None = None
     last_heartbeat: float | None = None
@@ -132,9 +133,7 @@ class SlurmManager:
         future = self._future_registry.get(sub_info.job_id)
         if not future:
             return
-        cancel_msg = (
-            f"error:No heartbeat received within {HEARTBEAT_TIMEOUT}s for topic {sub_info.topic}."
-        )
+        cancel_msg = f"error:No heartbeat received within {HEARTBEAT_TIMEOUT}s for topic {sub_info.topic} and slurm JobID {sub_info.slurm_job_id}."
         if sub_info.heartbeat_received is True:
             cancel_msg += (
                 " Last heartbeat from job at "
@@ -144,7 +143,11 @@ class SlurmManager:
         self._event_callback(
             StatusMessage(
                 status=cancel_msg,
-                metadata={"timestamp_received": str(time.monotonic()), "job_id": sub_info.job_id},
+                metadata={
+                    "msg_received": datetime.now().isoformat(),
+                    "job_id": future._job_id,
+                    "slurm_job_id": future.slurm_job_id,
+                },
             ),
             future=future,
         )
@@ -201,7 +204,11 @@ class SlurmManager:
             self._event_callback(
                 StatusMessage(
                     status="cancelled",
-                    metadata={"timestamp_received": str(time.monotonic()), "job_id": job_id},
+                    metadata={
+                        "msg_received": datetime.now().isoformat(),
+                        "job_id": job_future._job_id,
+                        "slurm_job_id": job_future.slurm_job_id,
+                    },
                 ),
                 future=job_future,
             )
@@ -297,8 +304,9 @@ class SlurmManager:
                         StatusMessage(
                             status=f"error:Removal requested by user; timestamp {datetime.now().isoformat()}",
                             metadata={
-                                "timestamp_received": str(time.monotonic()),
-                                "job_id": job_id,
+                                "msg_received": datetime.now().isoformat(),
+                                "job_id": future._job_id,
+                                "slurm_job_id": future.slurm_job_id,
                             },
                         ),
                         future,
@@ -345,18 +353,41 @@ class SlurmManager:
         def wrapped_callback(
             message: SlurmMessage,
             executor: ThreadPoolExecutor,
+            job_id: str,
+            slurm_job_id: str,
             callback_kwargs: dict[str, Any] | None = None,
         ) -> None:
+            message.metadata.update(
+                {
+                    "msg_received": datetime.now().isoformat(),
+                    "job_id": job_id,
+                    "slurm_job_id": slurm_job_id,
+                }
+            )
             executor.submit(callback, message, **(callback_kwargs or {}))
 
+        future = self._future_registry.get(job_id)
+        if future is None:
+            logger.warning(
+                "Trying to add subscription for job_id %s which does not exist in future registry.",
+                job_id,
+            )
+            return ""
         cb_id = self.sub_client.subscribe(
             topic_str,
-            partial(wrapped_callback, executor=self.executor, callback_kwargs=callback_kwargs),
+            partial(
+                wrapped_callback,
+                executor=self.executor,
+                callback_kwargs=callback_kwargs,
+                job_id=job_id,
+                slurm_job_id=future.slurm_job_id,
+            ),
         )
 
         sub_info = SubscriptionInfo(
             job_id=job_id,
             topic=topic_str,
+            slurm_job_id=future.slurm_job_id,
             callback=wrapped_callback,
             last_heartbeat=None,
             callback_id=cb_id,
@@ -374,13 +405,14 @@ class SlurmManager:
         return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     def _subscribe_to_internal_topics(self, future: JobFuture, topic_info: TopicInfo) -> None:
-        self._subscribe_to_heartbeat(topic_info)
+        self._subscribe_to_heartbeat(topic_info, future)
         self._subscribe_to_event(topic_info, future)
 
-    def _subscribe_to_heartbeat(self, topic_info: TopicInfo) -> None:
+    def _subscribe_to_heartbeat(self, topic_info: TopicInfo, future: JobFuture) -> None:
         sub_info = SubscriptionInfo(
             job_id=topic_info.job_id,
             topic=topic_info.heartbeat,
+            slurm_job_id=future.slurm_job_id,
             callback=None,
             last_heartbeat=None,
             callback_id=None,
@@ -390,7 +422,13 @@ class SlurmManager:
 
         def wrapped_callback(message: HeartBeatMessage, sub_info: SubscriptionInfo) -> None:
             try:
-                message.metadata.update()
+                message.metadata.update(
+                    {
+                        "msg_received": datetime.now().isoformat(),
+                        "job_id": sub_info.job_id,
+                        "slurm_job_id": sub_info.slurm_job_id,
+                    }
+                )
                 self._heartbeat_callback(message, sub_info)
             except Exception:
                 logger.error("Error in callback for topic %s: %s", message.topic, message.payload)
@@ -408,6 +446,7 @@ class SlurmManager:
         sub_info = SubscriptionInfo(
             job_id=topic_info.job_id,
             topic=topic_info.event,
+            slurm_job_id=future.slurm_job_id,
             callback=None,
             last_heartbeat=None,
             callback_id=None,
@@ -418,7 +457,11 @@ class SlurmManager:
         def wrapped_callback(message: StatusMessage, future: JobFuture) -> None:
             try:
                 message.metadata.update(
-                    {"timestamp_received": str(time.monotonic()), "job_id": sub_info.job_id}
+                    {
+                        "msg_received": datetime.now().isoformat(),
+                        "job_id": future._job_id,
+                        "slurm_job_id": future.slurm_job_id,
+                    }
                 )
                 self._event_callback(message, future=future)
             except Exception:
