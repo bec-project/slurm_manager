@@ -6,7 +6,7 @@ from functools import partial
 
 import fakeredis
 
-from slurm_manager.redis_sub_client import Message, RedisSubClient
+from slurm_manager.redis_sub_client import RedisSubClient, SlurmMessage
 
 
 def _make_client() -> RedisSubClient:
@@ -17,10 +17,10 @@ def _make_client() -> RedisSubClient:
 
 def test_subscribe_dispatch_unsubscribe_cycle():
     client = _make_client()
-    received: list[Message] = []
+    received: list[SlurmMessage] = []
     received_event = threading.Event()
 
-    def callback(message: Message):
+    def callback(message: SlurmMessage):
         received.append(message)
         received_event.set()
 

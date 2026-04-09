@@ -21,6 +21,7 @@ from slurm_manager.event_messages import SlurmMessage, parse_slurm_message
 logger = logging.getLogger(__name__)
 
 
+Message = SlurmMessage
 MessageCallback = Callable[[SlurmMessage], None]
 
 
