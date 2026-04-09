@@ -4,6 +4,7 @@ import threading
 import time
 from functools import partial
 from unittest import mock
+from functools import partial
 
 import fakeredis
 import pytest
@@ -46,12 +47,18 @@ def test_redis_pubsub_listener(client):
 def test_redis_pubsub_unsubscribe_topic(client):
     got: list[str] = []
 
-    client.subscribe("a", lambda msg: got.append("cb1"))
-    client.subscribe("a", lambda msg: got.append("cb2"))
+    received_event = threading.Event()
+
+    def _callback(message, text: str, **kwargs):
+        got.append(text)
+        received_event.set()
+
+    client.subscribe("a", partial(_callback, text="cb1"))
+    client.subscribe("a", partial(_callback, text="cb2"))
 
     assert client.unsubscribe_topic("a") == 2
-    client._redis.publish("a", "x")
-    time.sleep(0.05)
+    client._redis.publish("job/1/status", '{"msg_type":"status", "status": "running"}')
+    assert not received_event.wait(timeout=1)
     assert not got, "Callbacks should not be called after unsubscribing from topic"
     client.shutdown()
 
@@ -71,10 +78,6 @@ def test_redis_pubsub_shutdown(client):
         assert mock_redis_close.called, "Redis close method should be called on shutdown"
 
 
-# "type": message_type,
-#                 "pattern": response[1],
-#                 "channel": response[2],
-#                 "data": response[3],
 @pytest.mark.parametrize(
     "payload, expected",
     [

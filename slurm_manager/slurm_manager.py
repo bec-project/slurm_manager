@@ -120,7 +120,7 @@ class SlurmManager:
                         infos = self._subscriptions_by_topic.get(topic, {})
                         for sub_info in infos.values():
                             if sub_info and sub_info.last_heartbeat:
-                                if time.monotonic() - sub_info.last_heartbeat > HEARTBEAT_TIMEOUT:
+                                if time.time() - sub_info.last_heartbeat > HEARTBEAT_TIMEOUT:
                                     missing_heartbeats.append(sub_info)
 
             for sub_info in missing_heartbeats:
@@ -129,7 +129,7 @@ class SlurmManager:
     def _check_slurm_job(self, sub_info: SubscriptionInfo) -> None:
         """Check if a SLURM job is active"""
         # TODO check if job is Pending through SLURM Rest API..
-        # Currently we just trigger a cleanup if heartbea is missing.
+        # Currently we just trigger a cleanup if heartbeat is missing.
         future = self._future_registry.get(sub_info.job_id)
         if not future:
             return
@@ -216,20 +216,19 @@ class SlurmManager:
     def listen(
         self,
         event_type: Literal["heartbeat", "log", "status"],
-        callback: Callable[[StatusMessage], None],
+        callback: Callable[[SlurmMessage], None],
         job_id: str | None = None,
     ) -> list[str]:
         """
         Register a callback to listen for events of the specified type ('heartbeat', 'log', or 'status').
-        Additional keyword arguments for the callback can be passed via callback_kwargs dictionary. These
-        will be passed to the callback when it is executed. If the job_id is specified, the callback will
-        only be registered for the specific job. If job_id is None, the callback will be registered for all jobs
+        If the job_id is specified, the callback will only be registered for the specific job. If job_id is None,
+        the callback will be registered for all jobs.
         Returns a callback ID that can be used to unregister.
 
         Args:
             event_type: The type of event to listen for ('heartbeat', 'log', or 'status').
-            callback: A function that takes a Message object as input and is called when an event of the specified type is received for any job.
-                      The Message object contains two fields, 'topic', 'data'
+            callback: A function that takes a SlurmMessage object as input and is called when an event of the specified type is received for any job.
+                      The SlurmMessage object contains two fields, 'topic', 'data'
 
         Returns:
             A list of unique callback IDS will be returned which can be used to unregister the callbacks later.
@@ -237,8 +236,11 @@ class SlurmManager:
         job_futures: list[JobFuture] = (
             [self._future_registry[job_id]] if job_id else list(self._future_registry.values())
         )
+        callback_ids = []
         for future in job_futures:
-            future.listen(event_type=event_type, callback=callback)
+            callback_ids.append(future.listen(event_type=event_type, callback=callback))
+
+        return callback_ids
 
     def unlisten(self, callback_id: str | list[str]) -> None:
         self.remove_subscription_by_id(callback_id)
@@ -431,16 +433,18 @@ class SlurmManager:
                 )
                 self._heartbeat_callback(message, sub_info)
             except Exception:
-                logger.error("Error in callback for topic %s: %s", message.topic, message.payload)
+                logger.error(
+                    "Error in callback for topic %s: %s", message.msg_type, message.timestamp
+                )
 
         cb_id = self.sub_client.subscribe(topic, partial(wrapped_callback, sub_info=sub_info))
         sub_info.callback_id = cb_id
-        sub_info.last_heartbeat = time.monotonic()
+        sub_info.last_heartbeat = time.time()
         self._register_subscription_for_job(sub_info=sub_info)
 
     def _heartbeat_callback(self, message: HeartBeatMessage, sub_info: SubscriptionInfo) -> None:
         sub_info.heartbeat_received = True
-        sub_info.last_heartbeat = time.monotonic()
+        sub_info.last_heartbeat = time.time()
 
     def _subscribe_to_event(self, topic_info: TopicInfo, future: JobFuture) -> None:
         sub_info = SubscriptionInfo(
@@ -465,7 +469,7 @@ class SlurmManager:
                 )
                 self._event_callback(message, future=future)
             except Exception:
-                logger.error("Error in callback for topic %s: %s", message.topic, message.payload)
+                logger.error("Error in callback for topic %s: %s", message.msg_type, message.status)
 
         cb_id = self.sub_client.subscribe(event_topic, partial(wrapped_callback, future=future))
         sub_info.callback_id = cb_id
