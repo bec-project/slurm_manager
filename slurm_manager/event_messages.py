@@ -14,7 +14,7 @@ class SlurmBaseMessage(BaseModel):
     msg_type: str = Field(description="Discriminator used to parse incoming job messages.")
     metadata: dict[str, str] = Field(
         default_factory=dict,
-        description="Metadata dictionary that contains additional information abou the message, e.g. timestamp_received, slurm_job_id, job_id.",
+        description="Metadata dictionary that contains additional information abou the message, e.g. msg_received, slurm_job_id, job_id.",
     )
 
 
