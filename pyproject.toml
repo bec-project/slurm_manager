@@ -16,7 +16,7 @@ classifiers = [
 dependencies = [
     "hiredis~=3.0",
     "pydantic~=2.8, <2.12.0",
-    "redis~=6.2,>=6.2.0",
+    "redis~=6.2",
 ]
 
 [project.optional-dependencies]
