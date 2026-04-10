@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import threading
-import time
 from functools import partial
 from unittest import mock
-from functools import partial
 
 import fakeredis
 import pytest
