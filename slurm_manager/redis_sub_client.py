@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
+import traceback
 
 from redis.client import Redis
 from redis.exceptions import RedisError
@@ -175,8 +176,13 @@ class RedisSubClient:
                 try:
                     subscription.callback(message)
                 except Exception:
+                    format_exc = traceback.format_exc()
                     logger.error(
-                        "Error in callback for topic %s (subscription %s)", topic, subscription.id
+                        "Error in callback for topic %s (subscription %s) for callback %s. Traceback: %s",
+                        topic,
+                        subscription.id,
+                        subscription.callback,
+                        format_exc,
                     )
 
     @staticmethod
