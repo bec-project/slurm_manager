@@ -57,12 +57,13 @@ class JobFuture:
     ):
         self._job_id = job_id
         self._manager = manager
-        self._slurm_job_id = slurm_job_id
+        self._slurm_job_id, _, cluster = slurm_job_id.strip().partition(";")
+        self._slurm_cluster = cluster or None
         self._registry = registry if registry is not None else {}
         self._future = Future()
         if name is None:
             name = "Job"
-        self.name = f"{name}-{slurm_job_id}"
+        self.name = f"{name}-{self._slurm_job_id}"
         self._status: str = JobStatus.PENDING.value
         self._shutdown_event = threading.Event()
         self._lock = threading.RLock()
@@ -74,8 +75,13 @@ class JobFuture:
 
     @property
     def slurm_job_id(self) -> str:
-        """The SLURM ID of the job, as returned by sbatch."""
+        """The numeric SLURM job ID, without an optional cluster suffix."""
         return self._slurm_job_id
+
+    @property
+    def slurm_cluster(self) -> str | None:
+        """The cluster returned by sbatch, or None for the default cluster."""
+        return self._slurm_cluster
 
     @property
     def status(self) -> str | None:
@@ -84,7 +90,9 @@ class JobFuture:
 
     def cancel(self):
         """Cancel the job."""
-        self._manager.cancel_job(slurm_job_id=self.slurm_job_id, job_id=self._job_id)
+        self._manager.cancel_job(
+            slurm_job_id=self.slurm_job_id, job_id=self._job_id, slurm_cluster=self.slurm_cluster
+        )
 
     def exception(self) -> Exception | None:
         """If the job has finished with an error, return the exception. Otherwise, return None."""
@@ -146,15 +154,22 @@ class JobFuture:
         Args:
             callback_id: The unique ID of the callback to unregister, as returned by listen()
         """
+        removed = False
         with self._lock:
             for event, callbacks in self._callback_registry.items():
                 for cb in callbacks:
                     if cb.id == callback_id:
                         callbacks.remove(cb)
-                        self._manager.remove_subscription_by_id(callback_id=callback_id)
-                        if not callbacks:  # if no more callbacks for event, remove the event
+                        if not callbacks:
                             self._callback_registry.pop(event, None)
-                        return
+                        removed = True
+                        break
+                if removed:
+                    break
+        # Manager cleanup may acquire this future's lock while holding its own.
+        # Release the future lock before acquiring the manager lock.
+        if removed:
+            self._manager.remove_subscription_by_id(callback_id=callback_id)
 
     ###################
     ## Internal Methods

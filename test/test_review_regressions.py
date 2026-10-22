@@ -11,7 +11,7 @@ from unittest import mock
 import fakeredis
 import pytest
 
-from slurm_manager.event_messages import HeartBeatMessage
+from slurm_manager.event_messages import HeartBeatMessage, StatusMessage
 from slurm_manager.job_future import JobFuture
 from slurm_manager.redis_sub_client import RedisSubClient
 from slurm_manager.slurm_manager import SlurmManager, TopicInfo
@@ -220,3 +220,162 @@ def test_removing_last_log_callback_unsubscribes_topic(manager):
     assert topic not in manager._active_subscriptions[future._job_id]
     assert topic not in manager.sub_client.registered_topics
     assert TopicInfo(future._job_id).heartbeat in manager.sub_client.registered_topics
+
+
+def cluster_submission(manager):
+    original = manager._run_subprocess.side_effect
+
+    def slurm(command):
+        if command[0] == "sbatch":
+            return subprocess.CompletedProcess(command, 0, "123;cluster_a\n", "")
+        return original(command)
+
+    manager._run_subprocess.side_effect = slurm
+
+
+def test_cluster_qualified_job_is_released_and_cancelled_on_its_cluster(manager):
+    cluster_submission(manager)
+    future = submit(manager)
+    assert future.slurm_job_id == "123"
+    assert future.slurm_cluster == "cluster_a"
+    assert mock.call(["scontrol", "--clusters", "cluster_a", "release", "123"]) in (
+        manager._run_subprocess.call_args_list
+    )
+    future.cancel()
+    assert manager._run_subprocess.call_args == mock.call(
+        ["scancel", "--clusters", "cluster_a", "123"]
+    )
+
+
+def test_cluster_qualified_setup_failure_cancels_on_its_cluster(manager):
+    cluster_submission(manager)
+    with (
+        mock.patch.object(
+            manager.sub_client, "wait_until_subscribed", side_effect=TimeoutError("no ack")
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        submit(manager)
+    assert manager._run_subprocess.call_args == mock.call(
+        ["scancel", "--clusters", "cluster_a", "123"]
+    )
+    assert not manager._future_registry
+    assert not manager.sub_client.registered_topics
+
+
+def test_cluster_qualified_job_monitoring_queries_its_cluster(manager):
+    cluster_submission(manager)
+    future = submit(manager)
+    manager._run_subprocess.reset_mock()
+    manager._run_subprocess.side_effect = [
+        subprocess.CompletedProcess([], 0, "", ""),
+        subprocess.CompletedProcess([], 0, "COMPLETED|0:0\n", ""),
+    ]
+    manager._check_slurm_job(heartbeat_info(manager, future))
+    commands = [call.args[0] for call in manager._run_subprocess.call_args_list]
+    assert [command[0] for command in commands] == ["squeue", "sacct"]
+    for command in commands:
+        assert command[1:3] == ["--clusters", "cluster_a"]
+        assert command[command.index("--jobs") + 1] == "123"
+    assert future.success()
+
+
+def test_completion_during_subscription_registration_leaves_no_orphan(manager):
+    future = submit(manager)
+    subscribed = threading.Event()
+    resume = threading.Event()
+    cleaned = threading.Event()
+    errors = []
+    original_subscribe = manager.sub_client.subscribe
+    original_event = manager._event_callback
+
+    def subscribe(topic, callback):
+        callback_id = original_subscribe(topic, callback)
+        subscribed.set()
+        assert resume.wait(2)
+        return callback_id
+
+    def event(message, future):
+        original_event(message, future)
+        cleaned.set()
+
+    def listen():
+        try:
+            future.listen("log", lambda _: None)
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    with (
+        mock.patch.object(manager.sub_client, "subscribe", side_effect=subscribe),
+        mock.patch.object(manager, "_event_callback", side_effect=event),
+    ):
+        thread = threading.Thread(target=listen)
+        thread.start()
+        try:
+            assert subscribed.wait(1)
+            manager.sub_client._redis.publish(
+                TopicInfo(future._job_id).event, '{"msg_type":"status","status":"finished"}'
+            )
+            future.wait(timeout=1)
+        finally:
+            resume.set()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert cleaned.wait(1)
+    assert len(errors) == 1
+    assert not manager._future_registry
+    assert not manager._active_subscriptions
+    assert not manager._topic_by_subscription_id
+    assert not manager.sub_client.registered_topics
+    assert not manager.sub_client._topic_by_subscription_id
+
+
+def test_listen_after_completion_does_not_register_callback(manager):
+    future = submit(manager)
+    manager._event_callback(StatusMessage(status="finished"), future)
+    with pytest.raises(RuntimeError, match="no longer active"):
+        future.listen("log", lambda _: None)
+    assert not manager.sub_client.registered_topics
+
+
+def test_unlisten_allows_concurrent_job_cleanup(manager):
+    future = submit(manager)
+    callback_id = future.listen("log", lambda _: None)
+    cleaned = threading.Event()
+    errors = []
+    completed_during_removal = []
+    original_remove = manager.remove_subscription_by_id
+
+    def cleanup():
+        try:
+            manager.remove_subscriptions_for_job(future._job_id)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            cleaned.set()
+
+    thread = threading.Thread(target=cleanup)
+
+    def remove(callback_id):
+        # Cleanup takes the manager lock and then updates the future. It must
+        # finish even while unlisten is paused at the manager call boundary.
+        thread.start()
+        completed = cleaned.wait(1)
+        completed_during_removal.append(completed)
+        if completed:
+            original_remove(callback_id)
+        # On regression, return without taking the manager lock so unlisten
+        # releases its lock and the test can join cleanup instead of hanging.
+
+    with mock.patch.object(manager, "remove_subscription_by_id", side_effect=remove):
+        try:
+            future.unlisten(callback_id)
+        finally:
+            thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert not errors
+    assert completed_during_removal == [True]
+    assert future.done()
+    assert not future._callback_registry
+    assert not manager._future_registry
+    assert not manager.sub_client.registered_topics
