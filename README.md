@@ -51,4 +51,4 @@ ruff format --check .
 python -m pytest --random-order -q test
 ```
 
-Unit tests run on Python 3.11 and 3.14. Other CI checks use Python 3.13.
+Unit tests run on Python 3.12, 3.13, and 3.14. Other CI checks use Python 3.13.

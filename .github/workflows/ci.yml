@@ -19,3 +19,8 @@ jobs:
     needs: check_pr_status
     if: needs.check_pr_status.outputs.branch-pr == ''
     uses: ./.github/workflows/formatter.yml
+
+  unit_tests:
+    needs: check_pr_status
+    if: needs.check_pr_status.outputs.branch-pr == ''
+    uses: ./.github/workflows/unit_tests.yml
