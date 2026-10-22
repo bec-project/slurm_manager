@@ -16,7 +16,9 @@ def client():
     """FakeRedis-based RedisServer fixture for testing the RedisSubClient."""
     server = fakeredis.FakeServer()
     redis_cls = partial(fakeredis.FakeRedis, server=server, decode_responses=True)
-    return RedisSubClient(bootstrap="localhost:6379", redis_cls=redis_cls)
+    client = RedisSubClient(bootstrap="localhost:6379", redis_cls=redis_cls)
+    yield client
+    client.shutdown()
 
 
 def test_redis_pubsub_listener(client):
@@ -55,7 +57,7 @@ def test_redis_pubsub_unsubscribe_topic(client):
     client.subscribe("a", partial(_callback, text="cb2"))
 
     assert client.unsubscribe_topic("a") == 2
-    client._redis.publish("job/1/status", '{"msg_type":"status", "status": "running"}')
+    client._redis.publish("a", '{"msg_type":"status", "status": "running"}')
     assert not received_event.wait(timeout=1)
     assert not got, "Callbacks should not be called after unsubscribing from topic"
     client.shutdown()
@@ -69,9 +71,9 @@ def test_redis_pubsub_shutdown(client):
     ):
         client._ensure_threads_started()
         client.shutdown()
-        assert (
-            not client._listener_thread.is_alive()
-        ), "Listener thread should be stopped after shutdown"
+        assert not client._listener_thread.is_alive(), (
+            "Listener thread should be stopped after shutdown"
+        )
         assert mock_close.called, "PubSub close method should be called on shutdown"
         assert mock_redis_close.called, "Redis close method should be called on shutdown"
 
