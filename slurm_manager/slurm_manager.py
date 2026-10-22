@@ -28,6 +28,11 @@ logger = getLogger(__name__)
 _STOP = object()
 
 
+def _cluster_args(cluster: str | None) -> list[str]:
+    """Route Slurm CLI operations to the cluster that accepted the job."""
+    return ["--clusters", cluster] if cluster else []
+
+
 @dataclass(frozen=True, slots=True)
 class TopicInfo:
     """Helper for topic specification within Redis bec-slurm pub/sub interface."""
@@ -139,7 +144,14 @@ class SlurmManager:
         sub_info.last_scheduler_check = time.time()
         try:
             queued = self._run_subprocess(
-                ["squeue", "--noheader", "--jobs", future.slurm_job_id, "--format=%T"]
+                [
+                    "squeue",
+                    *_cluster_args(future.slurm_cluster),
+                    "--noheader",
+                    "--jobs",
+                    future.slurm_job_id,
+                    "--format=%T",
+                ]
             )
             if queued.returncode == 0 and queued.stdout.strip():
                 # Pending, configuring, and running jobs may legitimately have no heartbeat.
@@ -147,6 +159,7 @@ class SlurmManager:
             accounting = self._run_subprocess(
                 [
                     "sacct",
+                    *_cluster_args(future.slurm_cluster),
                     "--noheader",
                     "--parsable2",
                     "--allocations",
@@ -220,19 +233,21 @@ class SlurmManager:
         job_future = JobFuture(
             job_id=job_id, manager=self, registry=self._future_registry, slurm_job_id=slurm_job_id
         )
+        slurm_job_id = job_future.slurm_job_id
+        cluster_args = _cluster_args(job_future.slurm_cluster)
         topic_info = TopicInfo(job_id=job_id)
         with self._lock:
             self._future_registry[job_id] = job_future
         try:
             self._subscribe_to_internal_topics(future=job_future, topic_info=topic_info)
             self.sub_client.wait_until_subscribed([topic_info.heartbeat, topic_info.event])
-            released = self._run_subprocess(["scontrol", "release", slurm_job_id])
+            released = self._run_subprocess(["scontrol", *cluster_args, "release", slurm_job_id])
             if released.returncode != 0:
                 raise RuntimeError(f"scontrol release failed: {(released.stderr or '').strip()}")
         except Exception as exc:
             # A setup failure must not leave a held allocation behind.
             try:
-                cancelled = self._run_subprocess(["scancel", slurm_job_id])
+                cancelled = self._run_subprocess(["scancel", *cluster_args, slurm_job_id])
                 if cancelled.returncode != 0:
                     logger.error("Could not cancel held job %s: %s", slurm_job_id, cancelled.stderr)
             except (OSError, subprocess.SubprocessError):
@@ -243,14 +258,18 @@ class SlurmManager:
             raise
         return job_future
 
-    def cancel_job(self, slurm_job_id: str, job_id: str) -> None:
-        """Cancel a job via scancel."""
-        result = self._run_subprocess(["scancel", slurm_job_id])
+    def cancel_job(
+        self, slurm_job_id: str, job_id: str, *, slurm_cluster: str | None = None
+    ) -> None:
+        """Cancel a job on its recorded cluster via scancel."""
+        job_future = self._future_registry.get(job_id)
+        slurm_job_id, _, cluster = slurm_job_id.partition(";")
+        cluster = slurm_cluster or cluster or (job_future.slurm_cluster if job_future else None)
+        result = self._run_subprocess(["scancel", *_cluster_args(cluster), slurm_job_id])
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
             raise RuntimeError(f"scancel failed: {stderr}")
 
-        job_future = self._future_registry.get(job_id)
         if job_future:
             self._event_callback(
                 StatusMessage(
@@ -425,35 +444,39 @@ class SlurmManager:
             )
             executor.submit(callback, message, **(callback_kwargs or {}))
 
-        future = self._future_registry.get(job_id)
-        if future is None:
-            logger.warning(
-                "Trying to add subscription for job_id %s which does not exist in future registry.",
-                job_id,
+        # Completion removes subscriptions under this same lock. Keep ownership
+        # registration atomic with cleanup, and undo Redis registration if the
+        # future became terminal while subscribe() was in progress.
+        with self._lock:
+            future = self._future_registry.get(job_id)
+            if future is None or future.done():
+                raise RuntimeError(f"Job {job_id} is no longer active")
+            cb_id = self.sub_client.subscribe(
+                topic_str,
+                partial(
+                    wrapped_callback,
+                    executor=self.executor,
+                    callback_kwargs=callback_kwargs,
+                    job_id=job_id,
+                    slurm_job_id=future.slurm_job_id,
+                ),
             )
-            return ""
-        cb_id = self.sub_client.subscribe(
-            topic_str,
-            partial(
-                wrapped_callback,
-                executor=self.executor,
-                callback_kwargs=callback_kwargs,
-                job_id=job_id,
-                slurm_job_id=future.slurm_job_id,
-            ),
-        )
 
-        sub_info = SubscriptionInfo(
-            job_id=job_id,
-            topic=topic_str,
-            slurm_job_id=future.slurm_job_id,
-            callback=wrapped_callback,
-            last_heartbeat=None,
-            callback_id=cb_id,
-            heartbeat_received=False,
-        )
-        self._register_subscription_for_job(sub_info=sub_info)
-        return cb_id
+            if self._future_registry.get(job_id) is not future or future.done():
+                self.sub_client.unsubscribe(cb_id)
+                raise RuntimeError(f"Job {job_id} finished during subscription registration")
+
+            sub_info = SubscriptionInfo(
+                job_id=job_id,
+                topic=topic_str,
+                slurm_job_id=future.slurm_job_id,
+                callback=wrapped_callback,
+                last_heartbeat=None,
+                callback_id=cb_id,
+                heartbeat_received=False,
+            )
+            self._register_subscription_for_job(sub_info=sub_info)
+            return cb_id
 
     def _remove_job_future(self, job_id: str) -> None:
         """Remove a job future from the registry."""
