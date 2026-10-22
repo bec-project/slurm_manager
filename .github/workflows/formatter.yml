@@ -1,4 +1,4 @@
-name: Ruff and unit tests
+name: Ruff
 on: [workflow_call]
 jobs:
   Ruff:
@@ -14,18 +14,3 @@ jobs:
         run: ruff check .
       - name: Check formatting
         run: ruff format --check .
-  UnitTests:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.14"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: python -m pip install -e '.[dev]'
-      - name: Run unit tests
-        run: python -m pytest --random-order -q test
