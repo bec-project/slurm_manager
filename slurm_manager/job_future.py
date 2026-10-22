@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import StrEnum
@@ -109,15 +108,7 @@ class JobFuture:
         Args:
             timeout: Maximum time to wait for the job to finish, in seconds. If None, wait indefinitely.
         """
-        self._raise_if_failed()
-
-        start_time = time.time()
-        poll_interval = 0.05  # seconds
-        while not self.done():
-            if timeout is not None and (time.time() - start_time) > timeout:
-                raise TimeoutError(f"{self.name} did not complete within {timeout} seconds.")
-            if self._shutdown_event.wait(timeout=poll_interval):
-                break
+        self._future.result(timeout=timeout)
 
     def listen(
         self,
@@ -197,8 +188,11 @@ class JobFuture:
             raise self._future.exception()
 
     def _update_status(self, status: str, exc_info: str | None = None) -> None:
-        self._status = status
-        if status == JobStatus.FINISHED:
-            self._set_finished()
-        elif status in (JobStatus.CANCELLED, JobStatus.ERROR):
-            self._set_exception(status, exc_info)
+        with self._lock:
+            if self._future.done():
+                return
+            self._status = status
+            if status == JobStatus.FINISHED:
+                self._set_finished()
+            elif status in (JobStatus.CANCELLED, JobStatus.ERROR):
+                self._set_exception(status, exc_info)

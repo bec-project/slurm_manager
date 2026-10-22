@@ -67,6 +67,7 @@ class SubscriptionInfo(BaseModel):
     callback_id: str | None = None
     last_heartbeat: float | None = None
     heartbeat_received: bool = False
+    last_scheduler_check: float | None = None
 
 
 HEARTBEAT_TIMEOUT = 10  # seconds
@@ -120,37 +121,68 @@ class SlurmManager:
                         infos = self._subscriptions_by_topic.get(topic, {})
                         for sub_info in infos.values():
                             if sub_info and sub_info.last_heartbeat:
-                                if time.time() - sub_info.last_heartbeat > HEARTBEAT_TIMEOUT:
+                                now = time.time()
+                                if now - sub_info.last_heartbeat > HEARTBEAT_TIMEOUT and (
+                                    sub_info.last_scheduler_check is None
+                                    or now - sub_info.last_scheduler_check > HEARTBEAT_TIMEOUT
+                                ):
                                     missing_heartbeats.append(sub_info)
 
             for sub_info in missing_heartbeats:
                 self._check_slurm_job(sub_info)
 
     def _check_slurm_job(self, sub_info: SubscriptionInfo) -> None:
-        """Check if a SLURM job is active"""
-        # TODO check if job is Pending through SLURM Rest API..
-        # Currently we just trigger a cleanup if heartbeat is missing.
+        """Resolve missing heartbeats using Slurm, never assuming silence means failure."""
         future = self._future_registry.get(sub_info.job_id)
-        if not future:
+        if future is None or future.done():
             return
-        cancel_msg = f"error:No heartbeat received within {HEARTBEAT_TIMEOUT}s for topic {sub_info.topic} and slurm JobID {sub_info.slurm_job_id}."
-        if sub_info.heartbeat_received is True:
-            cancel_msg += (
-                " Last heartbeat from job at "
-                f"{datetime.fromtimestamp(sub_info.last_heartbeat).isoformat()}."
+        sub_info.last_scheduler_check = time.time()
+        try:
+            queued = self._run_subprocess(
+                ["squeue", "--noheader", "--jobs", future.slurm_job_id, "--format=%T"]
             )
-
-        self._event_callback(
-            StatusMessage(
-                status=cancel_msg,
-                metadata={
-                    "msg_received": datetime.now().isoformat(),
-                    "job_id": future._job_id,
-                    "slurm_job_id": future.slurm_job_id,
-                },
-            ),
-            future=future,
-        )
+            if queued.returncode == 0 and queued.stdout.strip():
+                # Pending, configuring, and running jobs may legitimately have no heartbeat.
+                return
+            accounting = self._run_subprocess(
+                [
+                    "sacct",
+                    "--noheader",
+                    "--parsable2",
+                    "--allocations",
+                    "--jobs",
+                    future.slurm_job_id,
+                    "--format=State,ExitCode",
+                ]
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("Could not query Slurm job %s", future.slurm_job_id)
+            return
+        if accounting.returncode != 0 or not accounting.stdout.strip():
+            # Accounting may be disabled, delayed, or temporarily unavailable.
+            return
+        fields = accounting.stdout.strip().splitlines()[0].split("|")
+        state = fields[0].split()[0].rstrip("+")
+        exit_code = fields[1].strip() if len(fields) > 1 else ""
+        if state == "COMPLETED" and exit_code == "0:0":
+            status = JobStatus.FINISHED.value
+        elif state == "CANCELLED":
+            status = JobStatus.CANCELLED.value
+        elif state in {
+            "COMPLETED",
+            "FAILED",
+            "TIMEOUT",
+            "OUT_OF_MEMORY",
+            "NODE_FAIL",
+            "BOOT_FAIL",
+            "DEADLINE",
+            "PREEMPTED",
+            "REVOKED",
+        }:
+            status = f"error:Slurm state {state}, exit code {exit_code or 'unknown'}"
+        else:
+            return
+        self._event_callback(StatusMessage(status=status), future)
 
     def submit_job(self, script_path: str, env_path: str) -> JobFuture:
         """Create a temporary script from command and submit via sbatch wrapper."""
@@ -167,6 +199,7 @@ class SlurmManager:
         sbatch_cmd = [
             "sbatch",
             "--parsable",
+            "--hold",
             os.path.abspath(self._wrapper_path),
             env_path,
             script_path,
@@ -188,8 +221,26 @@ class SlurmManager:
             job_id=job_id, manager=self, registry=self._future_registry, slurm_job_id=slurm_job_id
         )
         topic_info = TopicInfo(job_id=job_id)
-        self._future_registry[job_id] = job_future
-        self._subscribe_to_internal_topics(future=job_future, topic_info=topic_info)
+        with self._lock:
+            self._future_registry[job_id] = job_future
+        try:
+            self._subscribe_to_internal_topics(future=job_future, topic_info=topic_info)
+            self.sub_client.wait_until_subscribed([topic_info.heartbeat, topic_info.event])
+            released = self._run_subprocess(["scontrol", "release", slurm_job_id])
+            if released.returncode != 0:
+                raise RuntimeError(f"scontrol release failed: {(released.stderr or '').strip()}")
+        except Exception as exc:
+            # A setup failure must not leave a held allocation behind.
+            try:
+                cancelled = self._run_subprocess(["scancel", slurm_job_id])
+                if cancelled.returncode != 0:
+                    logger.error("Could not cancel held job %s: %s", slurm_job_id, cancelled.stderr)
+            except (OSError, subprocess.SubprocessError):
+                logger.exception("Could not cancel held job %s", slurm_job_id)
+            self._event_callback(
+                StatusMessage(status=f"error:Submission setup failed: {exc}"), job_future
+            )
+            raise
         return job_future
 
     def cancel_job(self, slurm_job_id: str, job_id: str) -> None:
@@ -255,14 +306,15 @@ class SlurmManager:
                 if topic is not None:
                     callbacks = self._subscriptions_by_topic.get(topic, {})
                     sub_info = callbacks.pop(cb_id, None)
-                    if sub_info:
-                        job_id = sub_info.job_id
-                        self._active_subscriptions[job_id].discard(topic)
+                    self.sub_client.unsubscribe(cb_id)
 
-                    # If no more callbacks for the topic, remove the topic subscription
-                    if len(callbacks) == 0:
+                    # Other callbacks, including heartbeat monitoring, still own this topic.
+                    if not callbacks:
                         self._subscriptions_by_topic.pop(topic, None)
-                        self.sub_client.unsubscribe_topic(topic)
+                        if sub_info:
+                            topics = self._active_subscriptions.get(sub_info.job_id)
+                            if topics is not None:
+                                topics.discard(topic)
 
     def remove_subscription_by_topic(self, topic: str) -> None:
         """Remove a subscription by its topic."""
@@ -318,6 +370,11 @@ class SlurmManager:
     def shutdown(self, timeout: float | None = 1.0) -> None:
         """Shuts down the manager, including the heartbeat monitoring thread and Redis subscriptions."""
         self._stop_heartbeat_thread.set()
+        self._heartbeat_monitoring_thread.join(timeout)
+        if self._heartbeat_monitoring_thread.is_alive():
+            raise TimeoutError(
+                "Heartbeat monitor did not stop; retry after its Slurm query finishes"
+            )
         with self._lock:
             self._subscriptions_by_topic.clear()
             self._topic_by_subscription_id.clear()
@@ -404,7 +461,7 @@ class SlurmManager:
             self._future_registry.pop(job_id, None)
 
     def _run_subprocess(self, cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
 
     def _subscribe_to_internal_topics(self, future: JobFuture, topic_info: TopicInfo) -> None:
         self._subscribe_to_heartbeat(topic_info, future)

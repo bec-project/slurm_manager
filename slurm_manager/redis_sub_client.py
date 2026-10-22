@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
-import traceback
 
 from redis.client import Redis
 from redis.exceptions import RedisError
@@ -59,12 +60,13 @@ class RedisSubClient:
             host, port = bootstrap.split(":", maxsplit=1)
 
         self._redis = redis_cls(host=host, port=int(port), **redis_kwargs)
-        self._pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+        self._pubsub = self._redis.pubsub(ignore_subscribe_messages=False)
 
         self._lock = threading.RLock()
         self._subscriptions_by_topic: dict[str, dict[str, Subscription]] = {}
         self._topic_by_subscription_id: dict[str, str] = {}
 
+        self._subscription_ready: dict[str, threading.Event] = {}
         self._stop_listener = threading.Event()
         self._listener_thread: threading.Thread | None = None
 
@@ -82,8 +84,9 @@ class RedisSubClient:
         with self._lock:
             callbacks = self._subscriptions_by_topic.get(topic)
             if callbacks is None:
-                self._subscriptions_by_topic[topic] = {sub_id: subscription}
+                self._subscription_ready[topic] = threading.Event()
                 self._pubsub.subscribe(topic)
+                self._subscriptions_by_topic[topic] = {sub_id: subscription}
             else:
                 callbacks[sub_id] = subscription
             self._topic_by_subscription_id[sub_id] = topic
@@ -112,6 +115,7 @@ class RedisSubClient:
 
             # No more callbacks for this topic, we can unsubscribe from Redis and clean up
             self._subscriptions_by_topic.pop(topic, None)
+            self._subscription_ready.pop(topic, None)
             self._pubsub.unsubscribe(topic)
             return True
 
@@ -121,10 +125,20 @@ class RedisSubClient:
             callbacks = self._subscriptions_by_topic.pop(topic, None)
             if not callbacks:  # No callbacks for this topic, nothing happens
                 return 0
+            self._subscription_ready.pop(topic, None)
             for sub_id in callbacks:  # Clean up subscription id mapping
                 self._topic_by_subscription_id.pop(sub_id, None)
             self._pubsub.unsubscribe(topic)  # Unsubscribe from Redis
             return len(callbacks)
+
+    def wait_until_subscribed(self, topics: list[str], timeout: float = 5.0) -> None:
+        """Wait for Redis to acknowledge each subscription before releasing a job."""
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            ready = [(topic, self._subscription_ready[topic]) for topic in topics]
+        for topic, event in ready:
+            if not event.wait(max(0, deadline - time.monotonic())):
+                raise TimeoutError(f"Redis did not acknowledge subscription to {topic}")
 
     def shutdown(self, timeout: float | None = 1.0) -> None:
         """Stops worker threads and closes Redis resources."""
@@ -138,6 +152,7 @@ class RedisSubClient:
         with self._lock:
             self._subscriptions_by_topic.clear()
             self._topic_by_subscription_id.clear()
+            self._subscription_ready.clear()
 
         self._pubsub.close()
         self._redis.close()
@@ -155,13 +170,25 @@ class RedisSubClient:
         """Listener thread loop that polls for messages and dispatches them to callbacks."""
         while not self._stop_listener.is_set():
             try:
-                raw_message = self._pubsub.get_message(timeout=0.2)
+                with self._lock:
+                    raw_message = self._pubsub.get_message(timeout=0.05)
+                self._stop_listener.wait(0.001)
             except RedisError:
                 logger.error("Error while polling redis pub/sub")
                 self._stop_listener.wait(0.5)
                 continue
 
             if raw_message is None:
+                continue
+            if raw_message["type"] == "subscribe":
+                channel = raw_message["channel"]
+                topic = channel.decode() if isinstance(channel, bytes) else channel
+                with self._lock:
+                    event = self._subscription_ready.get(topic)
+                    if event is not None:
+                        event.set()
+                continue
+            if raw_message["type"] == "unsubscribe":
                 continue
 
             try:
