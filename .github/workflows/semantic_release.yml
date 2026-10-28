@@ -88,5 +88,6 @@ jobs:
           python -m pip install "python-semantic-release==9.*" wheel build twine
           semantic-release -vv version
           if [ ! -d dist ]; then echo No release will be made; exit 0; fi
-          twine upload dist/* --skip-existing
+          twine check dist/*
+          twine upload --verbose dist/* --skip-existing
           semantic-release publish
