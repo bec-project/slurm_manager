@@ -1,6 +1,50 @@
 # CHANGELOG
 
 
+## v1.0.0 (2026-10-28)
+
+### Bug Fixes
+
+- Apply manager listeners to current and future jobs
+  ([`cb82628`](https://github.com/bec-project/slurm_manager/commit/cb8262809f98c797e896fe5b9bfc1b90e6df8343))
+
+- Dispatch terminal statuses and log callback failures
+  ([`8bc0149`](https://github.com/bec-project/slurm_manager/commit/8bc0149b3569c8ba284eca0619b215bab9b7bd2a))
+
+- **ci**: Validate worker bundles and resume package uploads
+  ([`9b8ca5e`](https://github.com/bec-project/slurm_manager/commit/9b8ca5eed8ffdd87d12dd49e10294713e9d91d7f))
+
+- **worker**: Honor cancellation grace for child processes
+  ([`c46a8f8`](https://github.com/bec-project/slurm_manager/commit/c46a8f81080b8d76b6c9b67a413cdee9b76af1c5))
+
+### Continuous Integration
+
+- Test and build the Go worker
+  ([`6fa1d30`](https://github.com/bec-project/slurm_manager/commit/6fa1d30b47ef6c344b0666431b94acb72762e066))
+
+- Validate distributions and show PyPI upload errors
+  ([`1779368`](https://github.com/bec-project/slurm_manager/commit/177936846f53461bcf84e643cf58c4fa4ecbf340))
+
+### Documentation
+
+- Add job submission examples and project icon
+  ([`aa01055`](https://github.com/bec-project/slurm_manager/commit/aa010550e77578c6fc07e5dd67659edaf75671f1))
+
+- Preserve line breaks in live log example
+  ([`97e731d`](https://github.com/bec-project/slurm_manager/commit/97e731d6cb3337ca5367403bccaa933a7f16c0cd))
+
+### Features
+
+- Package bec-slurm-worker for Linux and RPM deployment
+  ([`4477cc1`](https://github.com/bec-project/slurm_manager/commit/4477cc11be1ac8ff5069cbb931d334bca074b92e))
+
+- Submit Slurm jobs through REST and track execution
+  ([`4d17ce9`](https://github.com/bec-project/slurm_manager/commit/4d17ce9d548075f60eb466ae9227e9a9da12a397))
+
+- **worker**: Add standalone Go job runner
+  ([`790ca5b`](https://github.com/bec-project/slurm_manager/commit/790ca5b396ed3d2362b7e384911b6fd71d4821de))
+
+
 ## v0.1.0 (2026-10-28)
 
 ### Bug Fixes
