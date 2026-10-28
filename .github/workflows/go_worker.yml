@@ -1,0 +1,24 @@
+name: Go worker
+on: [workflow_call]
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: worker/go.mod
+          cache-dependency-path: worker/go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Test and vet
+        run: make test
+      - name: Build static Linux binary
+        run: make build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slurm-worker-linux-amd64
+          path: dist/slurm-worker-linux-amd64
