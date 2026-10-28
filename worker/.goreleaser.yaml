@@ -10,13 +10,23 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    mod_timestamp: '{{ .CommitTimestamp }}'
     ldflags: [-s -w]
 
 archives:
   - formats: [tar.gz]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    builds_info:
+      owner: root
+      group: root
+      mtime: '{{ .CommitDate }}'
     files:
-      - README.md
+      - src: README.md
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: '{{ .CommitDate }}'
 
 nfpms:
   - id: bec-slurm-worker-rpm
@@ -29,12 +39,16 @@ nfpms:
     description: Execute Slurm batch workloads and forward logs, status, and heartbeats to Redis.
     formats: [rpm]
     bindir: /usr/bin
+    mtime: '{{ .CommitDate }}'
     dependencies:
       - bash
       - /usr/bin/getent
     contents:
       - src: README.md
         dst: /usr/share/doc/bec-slurm-worker/README.md
+        file_info:
+          mode: 0644
+          mtime: '{{ .CommitDate }}'
 
 checksum:
   name_template: checksums.txt
