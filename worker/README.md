@@ -29,6 +29,8 @@ with the value `username:token` and permission to publish BEC packages.
 Generic downloads:
 `https://gitea.psi.ch/api/packages/bec/generic/bec-slurm-worker/VERSION/FILENAME`
 
-The publisher refuses incomplete artifact sets and propagates upload failures.
-Existing package files are not overwritten. No packages are uploaded for PRs or
-untagged branch builds.
+The publisher requires both architectures and verifies the complete checksum manifest
+before uploading. Reruns compare existing remote files byte-for-byte and continue
+only when they match; conflicting files are never overwritten. Upload failures are
+reported, and a later run can resume missing generic files and RPM indexing.
+No packages are uploaded for PRs or untagged branch builds.
