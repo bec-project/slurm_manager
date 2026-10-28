@@ -12,11 +12,12 @@ from datetime import datetime
 from functools import partial, wraps
 from logging import getLogger
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
 from slurm_manager.event_messages import HeartBeatMessage, SlurmMessage, StatusMessage
-from slurm_manager.job_future import JobFuture, JobStatus
+from slurm_manager.job_future import JobFuture, JobStatus, RegisteredCallback
 from slurm_manager.redis_sub_client import RedisSubClient
 
 logger = getLogger(__name__)
@@ -106,6 +107,7 @@ class JobTracker:
         """
         self._sub_client = sub_client
         self._future_registry: dict[str, JobFuture] = {}
+        self._global_callbacks: dict[str, RegisteredCallback] = {}
         self._subscriptions_by_topic: dict[str, dict[str, SubscriptionInfo]] = defaultdict(dict)
         self._topic_by_subscription_id: dict[str, str] = {}
         self._active_subscriptions: dict[str, set[str]] = defaultdict(set)
@@ -210,6 +212,7 @@ class JobTracker:
             for subscription in callbacks:
                 if subscription.callback is not None:
                     subscription.callback(message)
+            self._dispatch_global(message, future._job_id, future.slurm_job_id)
             if status in (JobStatus.ERROR, JobStatus.FINISHED, JobStatus.CANCELLED):
                 self.remove_subscriptions_for_job(future._job_id, skip_event_callback=True)
 
@@ -248,7 +251,7 @@ class JobTracker:
         callback: Callable[[SlurmMessage], None],
         job_id: str | None = None,
     ) -> list[str]:
-        """Attach a callback to one tracked job or all currently tracked jobs.
+        """Register a callback for one job or all current and future jobs.
 
         Args:
             event_type (Literal['heartbeat', 'log', 'status']): Event to receive: log,
@@ -258,25 +261,29 @@ class JobTracker:
             job_id (str | None): Opaque manager identifier used in Redis topic names.
 
         Returns:
-            list[str]: Subscription IDs accepted by unlisten().
+            list[str]: A single registration ID accepted by unlisten(). Without a
+                job_id, the ID owns the persistent manager-wide registration.
 
         Raises:
+            ValueError: The event type is not log, status, or heartbeat.
             KeyError: The explicitly requested job ID is not tracked.
             RuntimeError: A selected job has already completed.
 
         Notes:
-            With job_id=None, registration applies to the current jobs, not future
-            submissions. Callbacks run in the tracker executor.
+            With job_id=None, registration applies to all current and future jobs until
+            unlisten() or shutdown(). Callbacks run in the tracker executor.
         """
+        if event_type not in ("heartbeat", "log", "status"):
+            raise ValueError("Event type must be log, status, or heartbeat")
         with self._lock:
-            job_futures = (
-                [self._future_registry[job_id]] if job_id else list(self._future_registry.values())
-            )
-        callback_ids = []
-        for future in job_futures:
-            callback_ids.append(future.listen(event_type=event_type, callback=callback))
-
-        return callback_ids
+            if job_id is None:
+                callback_id = str(uuid4())
+                self._global_callbacks[callback_id] = RegisteredCallback(
+                    id=callback_id, event=event_type, callback=callback
+                )
+                return [callback_id]
+            future = self._future_registry[job_id]
+        return [future.listen(event_type, callback)]
 
     def add_subscription(
         self,
@@ -377,6 +384,8 @@ class JobTracker:
             callback_id = [callback_id]
         with self._lock:
             for cb_id in callback_id:
+                if self._global_callbacks.pop(cb_id, None) is not None:
+                    continue
                 topic = self._topic_by_subscription_id.pop(cb_id, None)
                 if topic is None:
                     continue
@@ -464,6 +473,7 @@ class JobTracker:
             not cancelled and tracked futures are not marked complete.
         """
         with self._lock:
+            self._global_callbacks.clear()
             self._subscriptions_by_topic.clear()
             self._topic_by_subscription_id.clear()
         self._sub_client.shutdown(timeout=timeout)
@@ -501,8 +511,50 @@ class JobTracker:
             message (SlurmMessage): Redis status already handled by apply_status.
         """
 
+    def _dispatch_global(
+        self, message: SlurmMessage, job_id: str, slurm_job_id: str | None
+    ) -> None:
+        """Queue manager-wide callbacks for an event from any tracked job.
+
+        Args:
+            message (SlurmMessage): Parsed job event to dispatch.
+            job_id (str): Opaque manager job identifier.
+            slurm_job_id (str | None): Scheduler ID added to metadata when available.
+        """
+        with self._lock:
+            callbacks = [
+                item for item in self._global_callbacks.values() if item.event == message.msg_type
+            ]
+            if not callbacks:
+                return
+            metadata = {
+                **message.metadata,
+                "msg_received": datetime.now().isoformat(),
+                "job_id": job_id,
+            }
+            if slurm_job_id is not None:
+                metadata["slurm_job_id"] = slurm_job_id
+            for item in callbacks:
+                event = message.model_copy(update={"metadata": metadata.copy()})
+                self._executor.submit(self._run_callback, item.callback, event, {})
+
+    def _subscribe_to_log(self, topic_info: TopicInfo, future: JobFuture) -> None:
+        """Install one log subscription for current and future global listeners.
+
+        Args:
+            topic_info (TopicInfo): Redis topic names for the tracked job.
+            future (JobFuture): Tracked job supplying event metadata.
+        """
+        callback = partial(
+            self._dispatch_global, job_id=future._job_id, slurm_job_id=future.slurm_job_id
+        )
+        cb_id = self._sub_client.subscribe(topic_info.log, callback)
+        self._register_subscription_for_job(
+            SubscriptionInfo(job_id=future._job_id, topic=topic_info.log, callback_id=cb_id)
+        )
+
     def _subscribe_to_internal_topics(self, future: JobFuture, topic_info: TopicInfo) -> None:
-        """Attach the manager status and heartbeat callbacks before release.
+        """Attach the manager status, heartbeat, and log callbacks before release.
 
         Args:
             future (JobFuture): Tracked future whose lifecycle or subscriptions are
@@ -511,6 +563,7 @@ class JobTracker:
         """
         self._subscribe_to_heartbeat(topic_info, future)
         self._subscribe_to_event(topic_info, future)
+        self._subscribe_to_log(topic_info, future)
 
     def _subscribe_to_heartbeat(self, topic_info: TopicInfo, future: JobFuture) -> None:
         """Register the internal heartbeat callback and its initial timestamp.
@@ -632,6 +685,7 @@ class JobTracker:
         with self._lock:
             sub_info.heartbeat_received = True
             sub_info.last_heartbeat = time.time()
+            self._dispatch_global(message, sub_info.job_id, sub_info.slurm_job_id)
 
     def _remove_job_future(self, job_id: str) -> None:
         """Remove a future from the manager registry under its lock.
