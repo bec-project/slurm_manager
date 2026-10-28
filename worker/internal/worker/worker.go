@@ -177,17 +177,12 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 				defer close(watcherDone)
 				select {
 				case <-workContext.Done():
-					_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
-					timer := time.NewTimer(config.GracePeriod)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-						_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-					case <-processDone:
-						// Descendants may have survived the shell's termination.
-						_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-					}
+					terminateProcessGroup(command.Process.Pid, config.GracePeriod)
 				case <-processDone:
+					if workContext.Err() != nil {
+						terminateProcessGroup(command.Process.Pid, config.GracePeriod)
+						return
+					}
 					_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 				}
 			}()
@@ -232,6 +227,27 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 		return 1, fmt.Errorf("cannot publish terminal status: %w", terminalError)
 	}
 	return code, errors.Join(runError, outputError)
+}
+
+// terminateProcessGroup gives surviving descendants their grace period even when
+// the leader has exited. Return early only when the entire process group is gone.
+func terminateProcessGroup(pid int, grace time.Duration) {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return
+		}
+		select {
+		case <-deadline.C:
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			return
+		case <-poll.C:
+		}
+	}
 }
 
 // resolveHome uses the node's NSS lookup for site accounts (LDAP/SSSD).
