@@ -189,22 +189,29 @@ class JobTracker:
             same cleanup path as an explicit error.
         """
         info = message.status.split(":", 1)
-        status = info[0]
-        try:  # Catch irregular formatted status messages to avoid crashing the callback loop.
-            status = JobStatus(status)
+        try:
+            status = JobStatus(info[0])
         except ValueError:
-            logger.warning("Received unknown job status '%s' for job %s", status, future.name)
-            future._update_status(
-                "error",
-                f"Received unknown job status '{status}' from message: {message.model_dump()}",
-            )
-            self.remove_subscriptions_for_job(future._job_id, skip_event_callback=True)
-            return
-        exc_info = info[1] if len(info) > 1 else None
-        future._update_status(status, exc_info)
-        # Clean up subscriptions for finished job
-        if status in [JobStatus.ERROR, JobStatus.FINISHED, JobStatus.CANCELLED]:
-            self.remove_subscriptions_for_job(future._job_id, skip_event_callback=True)
+            logger.warning("Received unknown job status '%s' for job %s", info[0], future.name)
+            detail = f"Received unknown job status '{info[0]}' from message: {message.model_dump()}"
+            message = StatusMessage(status=f"error:{detail}", metadata=message.metadata.copy())
+            status = JobStatus.ERROR
+            info = [status.value, detail]
+
+        with self._lock:
+            if future.done():
+                return
+            topic = TopicInfo(future._job_id).event
+            callbacks = list(self._subscriptions_by_topic.get(topic, {}).values())
+            exc_info = info[1] if len(info) > 1 else None
+            future._update_status(status, exc_info)
+            # Queue notifications before cleanup or concurrent shutdown can discard them.
+            # User code runs on the executor, never on this thread under the state lock.
+            for subscription in callbacks:
+                if subscription.callback is not None:
+                    subscription.callback(message)
+            if status in (JobStatus.ERROR, JobStatus.FINISHED, JobStatus.CANCELLED):
+                self.remove_subscriptions_for_job(future._job_id, skip_event_callback=True)
 
     def get_missing_heartbeats(self) -> list[SubscriptionInfo]:
         """Select stale heartbeat subscriptions whose scheduler check is due.
@@ -325,26 +332,24 @@ class JobTracker:
                     "slurm_job_id": slurm_job_id,
                 }
             )
-            executor.submit(callback, message, **(callback_kwargs or {}))
+            executor.submit(self._run_callback, callback, message, callback_kwargs or {})
 
-        # Completion removes subscriptions under this same lock. Keep ownership
-        # registration atomic with cleanup, and undo Redis registration if the
-        # future became terminal while subscribe() was in progress.
         with self._lock:
             future = self._future_registry.get(job_id)
             if future is None or future.done():
                 raise RuntimeError(f"Job {job_id} is no longer active")
-            cb_id = self._sub_client.subscribe(
-                topic_str,
-                partial(
-                    wrapped_callback,
-                    executor=self._executor,
-                    callback_kwargs=callback_kwargs,
-                    job_id=job_id,
-                    slurm_job_id=future.slurm_job_id,
-                ),
-            )
-
+        dispatch = partial(
+            wrapped_callback,
+            executor=self._executor,
+            callback_kwargs=callback_kwargs,
+            job_id=job_id,
+            slurm_job_id=future.slurm_job_id,
+        )
+        # Registration may block. Let lifecycle updates proceed, then validate ownership
+        # under the state lock and undo the Redis subscription if the job finished.
+        redis_callback = self._ignore_status_message if key == "status" else dispatch
+        cb_id = self._sub_client.subscribe(topic_str, redis_callback)
+        with self._lock:
             if self._future_registry.get(job_id) is not future or future.done():
                 self._sub_client.unsubscribe(cb_id)
                 raise RuntimeError(f"Job {job_id} finished during subscription registration")
@@ -353,7 +358,7 @@ class JobTracker:
                 job_id=job_id,
                 topic=topic_str,
                 slurm_job_id=future.slurm_job_id,
-                callback=wrapped_callback,
+                callback=dispatch,
                 last_heartbeat=None,
                 callback_id=cb_id,
                 heartbeat_received=False,
@@ -421,17 +426,8 @@ class JobTracker:
             This only removes local monitoring; it does not cancel the Slurm allocation.
         """
         with self._lock:
-            topics = self._active_subscriptions.pop(job_id, set())
-            for topic in topics:
-                callbacks = self._subscriptions_by_topic.pop(topic, {})
-                for callback_id in callbacks:
-                    self._topic_by_subscription_id.pop(callback_id, None)
-                self._sub_client.unsubscribe_topic(topic)
             future = self._future_registry.get(job_id)
-            if future is None:
-                return
-            # This callback will trigger a cleanup.
-            if not skip_event_callback:
+            if future is not None and not future.done() and not skip_event_callback:
                 self.apply_status(
                     StatusMessage(
                         status=f"error:Removal requested by user; timestamp {datetime.now().isoformat()}",
@@ -443,7 +439,14 @@ class JobTracker:
                     ),
                     future,
                 )
-            self._remove_job_future(future._job_id)
+                return
+            topics = self._active_subscriptions.pop(job_id, set())
+            for topic in topics:
+                callbacks = self._subscriptions_by_topic.pop(topic, {})
+                for callback_id in callbacks:
+                    self._topic_by_subscription_id.pop(callback_id, None)
+                self._sub_client.unsubscribe_topic(topic)
+            self._remove_job_future(job_id)
 
     ################################################
     #  Public Lifecycle                            #
@@ -469,6 +472,34 @@ class JobTracker:
     ################################################
     #  Internal Subscriptions                      #
     ################################################
+
+    @staticmethod
+    def _run_callback(
+        callback: Callable[[SlurmMessage], None],
+        message: SlurmMessage,
+        callback_kwargs: dict[str, Any],
+    ) -> None:
+        """Execute a user callback and log asynchronous failures.
+
+        Args:
+            callback (Callable[[SlurmMessage], None]): User callback to execute.
+            message (SlurmMessage): Parsed job message delivered to the callback.
+            callback_kwargs (dict[str, Any]): Additional callback keyword arguments.
+        """
+        try:
+            callback(message, **callback_kwargs)
+        except Exception:
+            logger.exception(
+                "Error in %s callback for job %s", message.msg_type, message.metadata.get("job_id")
+            )
+
+    @staticmethod
+    def _ignore_status_message(message: SlurmMessage) -> None:
+        """Leave status dispatch to the internal lifecycle subscription.
+
+        Args:
+            message (SlurmMessage): Redis status already handled by apply_status.
+        """
 
     def _subscribe_to_internal_topics(self, future: JobFuture, topic_info: TopicInfo) -> None:
         """Attach the manager status and heartbeat callbacks before release.
