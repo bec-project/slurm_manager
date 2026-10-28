@@ -24,3 +24,8 @@ jobs:
     needs: check_pr_status
     if: needs.check_pr_status.outputs.branch-pr == ''
     uses: ./.github/workflows/unit_tests.yml
+
+  go_worker:
+    needs: check_pr_status
+    if: needs.check_pr_status.outputs.branch-pr == ''
+    uses: ./.github/workflows/go_worker.yml
