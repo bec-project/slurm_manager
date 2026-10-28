@@ -100,7 +100,7 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 	if config.Stderr == nil {
 		config.Stderr = io.Discard
 	}
-	directory, err := os.MkdirTemp("", "slurm-worker-")
+	directory, err := os.MkdirTemp("", "bec-slurm-worker-")
 	if err != nil {
 		return 1, err
 	}
@@ -162,7 +162,7 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 
 	stdout := &lineWriter{local: config.Stdout, stream: "stdout", publish: publish, onError: cancelWork}
 	stderr := &lineWriter{local: config.Stderr, stream: "stderr", publish: publish, onError: cancelWork}
-	command := exec.Command("/bin/bash", "-c", shellSetup, "slurm-worker", activation, script)
+	command := exec.Command("/bin/bash", "-c", shellSetup, "bec-slurm-worker", activation, script)
 	command.Env = append(os.Environ(), "HOME="+home)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdout, command.Stderr = stdout, stderr

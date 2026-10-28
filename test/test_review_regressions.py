@@ -92,7 +92,7 @@ def test_job_is_held_until_redis_acknowledges_subscriptions(manager):
         assert job["current_working_directory"] == "/remote/node/work"
         assert '"activation": ""' in script
         assert "stdout-test %02d/10" in script
-        assert "/usr/local/bin/slurm-worker" in script
+        assert "/usr/bin/bec-slurm-worker" in script
         future = next(iter(manager._job_tracker._future_registry.values()))
         topics = TopicInfo(future._job_id)
         assert manager.sub_client._subscription_ready[topics.event].is_set()

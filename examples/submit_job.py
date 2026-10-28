@@ -72,5 +72,5 @@ if __name__ == "__main__":
         script_path=Path(__file__).with_name("print_for_10s.sh"),
         working_directory="/das/home/your_username",
         log_directory="/das/home/your_username/slurm_logs",
-        worker_path="/das/home/your_username/slurm-worker",
+        worker_path="/das/home/your_username/bec-slurm-worker",
     )
