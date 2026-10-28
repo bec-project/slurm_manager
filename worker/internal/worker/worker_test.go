@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -353,5 +354,47 @@ func TestUnicodeAcrossChunkBoundariesSurvivesJSON(t *testing.T) {
 				t.Fatalf("corrupted %q at prefix %d", value, prefix)
 			}
 		}
+	}
+}
+
+func TestCancellationLetsRedirectedChildFinishCleanup(t *testing.T) {
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "flushed")
+	ready := filepath.Join(directory, "ready")
+	script := fmt.Sprintf(`trap 'exit 0' TERM
+/bin/bash -c 'trap "sleep 0.2; touch %s; exit" TERM; touch %s; while :; do sleep 0.01; done' >/dev/null 2>&1 &
+wait
+`, marker, ready)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	var out, errout bytes.Buffer
+	cfg := config(&out, &errout)
+	cfg.GracePeriod = time.Second
+	publisher := &fakePublisher{}
+	code, err := Run(ctx, cfg, Payload{Script: script}, publisher)
+	cancel()
+	<-watcherDone
+	if code != 143 || lastStatus(t, publisher) != "cancelled" {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("child cleanup was interrupted before the grace period elapsed: %v", err)
 	}
 }
