@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "slurm_manager"
+name = "bec-slurm-manager"
 version = "1.0.0"
 description = "A tool for managing slurm jobs."
 requires-python = ">=3.11"

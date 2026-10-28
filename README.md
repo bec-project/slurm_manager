@@ -2,20 +2,21 @@
   <img src="assets/slurm-manager.png" alt="Slurm Manager" width="180">
 </p>
 
-# slurm_manager
+# bec-slurm-manager
 
 Submit Slurm jobs through slurmrestd and receive live logs, status, and heartbeats through Redis.
 
 ## Setup
 
 ```bash
-pip install -e .
+pip install bec-slurm-manager
 cp .env.example .env
 ```
 
 Set `SLURM_JWT` in your local `.env` file. The example contains the RA REST URL
 and API version. This credential file is ignored by Git and never uploaded.
 The submitter needs access to slurmrestd and Redis.
+For development from a checkout, install with `pip install -e '.[dev]'`.
 
 ## Simple job
 
