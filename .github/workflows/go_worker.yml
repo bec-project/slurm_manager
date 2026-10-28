@@ -8,6 +8,8 @@ jobs:
         working-directory: worker
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: worker/go.mod
@@ -16,9 +18,31 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Test and vet
         run: make test
-      - name: Build static Linux binary
-        run: make build
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          install-only: true
+      - name: Select package version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev.${GITHUB_RUN_NUMBER}.g${GITHUB_SHA:0:12}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo 'Expected a semantic version after the v tag prefix.' >&2
+            exit 1
+          fi
+          printf 'BUILD_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Build Linux archives and RPMs
+        run: make package VERSION="$BUILD_VERSION"
       - uses: actions/upload-artifact@v4
         with:
-          name: slurm-worker-linux-amd64
-          path: dist/slurm-worker-linux-amd64
+          name: bec-slurm-worker-packages
+          if-no-files-found: error
+          path: |
+            worker/dist/*.tar.gz
+            worker/dist/*.rpm
+            worker/dist/checksums.txt

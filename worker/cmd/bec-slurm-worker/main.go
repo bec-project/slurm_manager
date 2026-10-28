@@ -1,4 +1,4 @@
-// slurm-worker executes one uploaded Bash workload and forwards feedback to Redis.
+// bec-slurm-worker executes one uploaded Bash workload and forwards feedback to Redis.
 package main
 
 import (
@@ -38,7 +38,7 @@ func main() {
 	stop()
 	_ = publisher.Close()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "slurm-worker:", err)
+		fmt.Fprintln(os.Stderr, "bec-slurm-worker:", err)
 	}
 	os.Exit(code)
 }

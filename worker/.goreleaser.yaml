@@ -1,0 +1,51 @@
+version: 2
+project_name: bec-slurm-worker
+
+builds:
+  - id: bec-slurm-worker
+    main: ./cmd/bec-slurm-worker
+    binary: bec-slurm-worker
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+
+archives:
+  - formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - README.md
+
+nfpms:
+  - id: bec-slurm-worker-rpm
+    ids: [bec-slurm-worker]
+    package_name: bec-slurm-worker
+    # Gitea generic package filenames do not allow RPM's prerelease tilde.
+    file_name_template: '{{ replace .ConventionalFileName "~" "_" }}'
+    homepage: https://github.com/bec-project/slurm_manager
+    maintainer: BEC Project
+    description: Execute Slurm batch workloads and forward logs, status, and heartbeats to Redis.
+    formats: [rpm]
+    bindir: /usr/bin
+    dependencies:
+      - bash
+      - /usr/bin/getent
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/bec-slurm-worker/README.md
+
+checksum:
+  name_template: checksums.txt
+
+# CI supplies the release-tag version or a unique development version.
+# Publishing to Gitea is a separate job after all CI checks have passed.
+snapshot:
+  version_template: '{{ .Env.BUILD_VERSION }}'
+
+changelog:
+  disable: true
+
+release:
+  disable: true

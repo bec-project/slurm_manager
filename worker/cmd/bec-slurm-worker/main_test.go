@@ -18,7 +18,7 @@ func TestCLIHelper(t *testing.T) {
 	if os.Getenv("SLURM_WORKER_TEST_HELPER") != "1" {
 		return
 	}
-	os.Args = []string{"slurm-worker", "--job-id", "cli-job", "--redis-address", os.Getenv("SLURM_WORKER_TEST_REDIS")}
+	os.Args = []string{"bec-slurm-worker", "--job-id", "cli-job", "--redis-address", os.Getenv("BEC_SLURM_WORKER_TEST_REDIS")}
 	main()
 }
 
@@ -38,7 +38,7 @@ func TestCLIExecutesUploadedPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := exec.CommandContext(ctx, executable, "-test.run=^TestCLIHelper$")
-	command.Env = append(os.Environ(), "SLURM_WORKER_TEST_HELPER=1", "SLURM_WORKER_TEST_REDIS="+server.Addr())
+	command.Env = append(os.Environ(), "SLURM_WORKER_TEST_HELPER=1", "BEC_SLURM_WORKER_TEST_REDIS="+server.Addr())
 	command.Stdin = strings.NewReader(`{"script":"printf 'hello from CLI\\n'","activation":"export WORKLOAD_TEST=1"}`)
 	output, err := command.CombinedOutput()
 	if err != nil {

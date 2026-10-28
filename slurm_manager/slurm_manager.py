@@ -53,7 +53,7 @@ class SlurmManager:
         *,
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
-        worker_path: str = "/usr/local/bin/slurm-worker",
+        worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> None:
         """Create REST/Redis clients and start background job monitoring.
 
@@ -342,7 +342,7 @@ class SlurmManager:
         env_path: str | Path | None,
         job_id: str,
         *,
-        worker_path: str = "/usr/local/bin/slurm-worker",
+        worker_path: str = "/usr/bin/bec-slurm-worker",
         redis_address: str = "localhost:6379",
     ) -> str:
         """Package local Bash file contents for the compute-node Go worker.
