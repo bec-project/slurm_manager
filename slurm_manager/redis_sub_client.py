@@ -52,6 +52,18 @@ class RedisSubClient:
         redis_cls: type[Redis] = Redis,
         **redis_kwargs: Any,
     ) -> None:
+        """Create Redis resources without starting the listener until subscribed.
+
+        Args:
+            bootstrap (str | list[str]): Redis host:port or a nonempty address list;
+                only the first entry is used.
+            redis_cls (type[Redis]): Redis client implementation, injectable for tests.
+            **redis_kwargs (Any): Additional Redis constructor options such as socket
+                timeouts.
+
+        Raises:
+            ValueError: The bootstrap list is empty or its address cannot be parsed.
+        """
         if isinstance(bootstrap, list):
             if not bootstrap:
                 raise ValueError("bootstrap list must not be empty")
@@ -70,14 +82,34 @@ class RedisSubClient:
         self._stop_listener = threading.Event()
         self._listener_thread: threading.Thread | None = None
 
+    ################################################
+    #  Public Subscriptions                        #
+    ################################################
+
     @property
     def registered_topics(self) -> set[str]:
-        """Returns all currently subscribed topics."""
+        """Return a snapshot of topics with active callbacks.
+
+        Returns:
+            set[str]: Currently registered Redis channel names.
+        """
         with self._lock:
             return set(self._subscriptions_by_topic.keys())
 
     def subscribe(self, topic: str, callback: MessageCallback) -> str:
-        """Subscribes callback to a topic and returns a subscription id."""
+        """Register a callback and start the listener if needed.
+
+        Args:
+            topic (str): Redis channel whose callback registrations are selected.
+            callback (MessageCallback): Callable receiving the parsed Slurm message.
+
+        Returns:
+            str: Unique subscription ID.
+
+        Notes:
+            The callback runs on the Redis listener thread and must remain fast and
+            nonblocking.
+        """
         sub_id = str(uuid4())
         subscription = Subscription(id=sub_id, topic=topic, callback=callback)
 
@@ -95,10 +127,13 @@ class RedisSubClient:
         return sub_id
 
     def unsubscribe(self, subscription_id: str) -> bool:
-        """
-        Unregisters one callback by subscription id.
+        """Remove one callback and unsubscribe its topic if it has no owners.
 
-        Returns True if a callback was removed, False otherwise.
+        Args:
+            subscription_id (str): Unique callback ID returned by subscribe().
+
+        Returns:
+            bool: True if the callback was registered; False if it was unknown.
         """
         with self._lock:
             topic = self._topic_by_subscription_id.pop(subscription_id, None)
@@ -120,7 +155,14 @@ class RedisSubClient:
             return True
 
     def unsubscribe_topic(self, topic: str) -> int:
-        """Unregisters all callbacks for a topic and returns removed count."""
+        """Remove every callback registered for one topic.
+
+        Args:
+            topic (str): Redis channel whose callback registrations are selected.
+
+        Returns:
+            int: Number of removed callbacks.
+        """
         with self._lock:
             callbacks = self._subscriptions_by_topic.pop(topic, None)
             if not callbacks:  # No callbacks for this topic, nothing happens
@@ -132,7 +174,19 @@ class RedisSubClient:
             return len(callbacks)
 
     def wait_until_subscribed(self, topics: list[str], timeout: float = 5.0) -> None:
-        """Wait for Redis to acknowledge each subscription before releasing a job."""
+        """Wait for Redis subscription acknowledgements before releasing a job.
+
+        Args:
+            topics (list[str]): Already registered channels whose acknowledgements must
+                be received.
+            timeout (float): Shared acknowledgement deadline in seconds across all
+                requested topics.
+
+        Raises:
+            KeyError: A requested topic is not registered.
+            TimeoutError: The shared deadline expires before all topics are
+                acknowledged.
+        """
         deadline = time.monotonic() + timeout
         with self._lock:
             ready = [(topic, self._subscription_ready[topic]) for topic in topics]
@@ -140,8 +194,21 @@ class RedisSubClient:
             if not event.wait(max(0, deadline - time.monotonic())):
                 raise TimeoutError(f"Redis did not acknowledge subscription to {topic}")
 
+    ################################################
+    #  Public Lifecycle                            #
+    ################################################
+
     def shutdown(self, timeout: float | None = 1.0) -> None:
-        """Stops worker threads and closes Redis resources."""
+        """Stop the listener and close Redis resources.
+
+        Args:
+            timeout (float | None): Listener join timeout in seconds; None waits
+                indefinitely.
+
+        Notes:
+            A listener that misses the join timeout is logged before resources are
+            closed.
+        """
         self._stop_listener.set()
 
         if self._listener_thread is not None:
@@ -157,8 +224,12 @@ class RedisSubClient:
         self._pubsub.close()
         self._redis.close()
 
+    ################################################
+    #  Internal Listener                           #
+    ################################################
+
     def _ensure_threads_started(self) -> None:
-        """Makes sure the listener thread is running to receive messages from Redis."""
+        """Start a listener if no listener thread is currently alive."""
         if self._listener_thread is None or not self._listener_thread.is_alive():
             self._stop_listener.clear()
             self._listener_thread = threading.Thread(
@@ -167,7 +238,12 @@ class RedisSubClient:
             self._listener_thread.start()
 
     def _listener_loop(self) -> None:
-        """Listener thread loop that polls for messages and dispatches them to callbacks."""
+        """Poll Redis, acknowledge subscriptions, and dispatch parsed messages.
+
+        Notes:
+            Redis errors are logged and polling resumes after a short delay. Callback
+            exceptions are logged without stopping other callbacks.
+        """
         while not self._stop_listener.is_set():
             try:
                 with self._lock:
@@ -212,9 +288,26 @@ class RedisSubClient:
                         format_exc,
                     )
 
+    ################################################
+    #  Internal Message Parsing                    #
+    ################################################
+
     @staticmethod
     def _normalize_message(message: dict[str, Any]) -> tuple[str, SlurmMessage]:
-        """Converts raw Redis message dict to normalized Message object."""
+        """Decode a Redis pub/sub payload into the corresponding message model.
+
+        Args:
+            message (dict[str, Any]): Raw Redis payload or parsed worker message, as
+                specified by the annotation.
+
+        Returns:
+            tuple[str, SlurmMessage]: Pair containing the channel name and validated
+                Slurm message.
+
+        Raises:
+            TypeError: The payload is neither JSON text nor a dictionary.
+            ValueError: The JSON or message schema is invalid.
+        """
         channel = message.get("channel")
         topic = channel.decode() if isinstance(channel, bytes) else str(channel)
 

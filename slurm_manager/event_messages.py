@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -49,8 +49,18 @@ SlurmMessage: TypeAlias = Annotated[
 SLURM_MESSAGE_ADAPTER = TypeAdapter(SlurmMessage)
 
 
-def parse_slurm_message(payload: str | dict) -> SlurmMessage:
-    """Parse a JSON payload into the appropriate slurm message model."""
+def parse_slurm_message(payload: str | dict[str, Any]) -> SlurmMessage:
+    """Validate a JSON or dictionary payload as a discriminated Slurm message.
+
+    Args:
+        payload (str | dict[str, Any]): JSON-compatible request body or incoming message payload.
+
+    Returns:
+        SlurmMessage: Heartbeat, status, or log message selected by msg_type.
+
+    Raises:
+        ValueError: The JSON or message schema is invalid.
+    """
     if isinstance(payload, str):
         payload = json.loads(payload)
     return SLURM_MESSAGE_ADAPTER.validate_python(payload)
