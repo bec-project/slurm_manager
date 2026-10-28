@@ -2,7 +2,7 @@
   <img src="assets/slurm-manager.png" alt="Slurm Manager" width="180">
 </p>
 
-# bec-slurm-manager
+# BEC Slurm Manager
 
 Submit Slurm jobs through slurmrestd and receive live logs, status, and heartbeats through Redis.
 
