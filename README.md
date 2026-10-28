@@ -61,7 +61,7 @@ try:
             standard_error="/das/home/your_username/slurm_logs/%j.err",
         ),
         callbacks={
-            "log": lambda message: print(message.log, end="", flush=True),
+            "log": lambda message: print(message.log, flush=True),
             "status": lambda message: print(f"Job status: {message.status}"),
         },
     )
