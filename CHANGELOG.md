@@ -1,6 +1,24 @@
 # CHANGELOG
 
 
+## v1.0.1 (2026-10-28)
+
+### Bug Fixes
+
+- Rename PyPI distribution to bec-slurm-manager
+  ([`f34a4a5`](https://github.com/bec-project/slurm_manager/commit/f34a4a5e22d84de405b1a6f657a1817c8b8fe68f))
+
+### Documentation
+
+- Use BEC Slurm Manager as README title
+  ([`71d00c9`](https://github.com/bec-project/slurm_manager/commit/71d00c972b0791d315f900fb8ff4f68435820532))
+
+### Testing
+
+- Add opt-in RA lifecycle and module smoke tests
+  ([`19971ef`](https://github.com/bec-project/slurm_manager/commit/19971ef8a9157ab3a249c5aba8d84165af08b19e))
+
+
 ## v1.0.0 (2026-10-28)
 
 ### Bug Fixes
