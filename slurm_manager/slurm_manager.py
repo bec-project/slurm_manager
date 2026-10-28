@@ -213,7 +213,7 @@ class SlurmManager:
         callback: Callable[[SlurmMessage], None],
         job_id: str | None = None,
     ) -> list[str]:
-        """Attach a callback to one tracked job or all currently tracked jobs.
+        """Register a callback for one job or all current and future jobs.
 
         Args:
             event_type (Literal['heartbeat', 'log', 'status']): Event to receive: log,
@@ -223,15 +223,17 @@ class SlurmManager:
             job_id (str | None): Opaque manager identifier used in Redis topic names.
 
         Returns:
-            list[str]: Subscription IDs accepted by unlisten().
+            list[str]: A single registration ID accepted by unlisten(). Without a
+                job_id, the ID owns the persistent manager-wide registration.
 
         Raises:
+            ValueError: The event type is not log, status, or heartbeat.
             KeyError: The explicitly requested job ID is not tracked.
             RuntimeError: A selected job has already completed.
 
         Notes:
-            With job_id=None, registration applies to the current jobs, not future
-            submissions. Callbacks run in the tracker executor.
+            With job_id=None, registration applies to all current and future jobs until
+            unlisten() or shutdown(). Callbacks run in the tracker executor.
         """
         return self._job_tracker.listen(event_type, callback, job_id)
 

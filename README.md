@@ -88,3 +88,8 @@ how long the client waits, in seconds; it raises on failure or timeout. A timeou
 does not cancel the job automatically, so the example explicitly calls
 `job.cancel()`. `manager.shutdown()` disconnects without cancelling jobs.
 Callbacks support `log`, `status`, and `heartbeat` and are attached before execution.
+
+`manager.listen("log", callback)` registers a callback for **all current and future
+jobs**, even when called before the first submission. Pass the returned IDs to
+`manager.unlisten(callback_ids)` to stop listening. Use `job.listen()` or pass
+`job_id` to `manager.listen()` to monitor one job only.

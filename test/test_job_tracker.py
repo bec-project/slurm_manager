@@ -51,6 +51,7 @@ def test_completion_preserves_other_jobs_and_their_redis_subscriptions(tracker):
     assert tracker._sub_client.registered_topics == {
         TopicInfo("second").heartbeat,
         TopicInfo("second").event,
+        TopicInfo("second").log,
     }
     tracker._sub_client._redis.publish(
         TopicInfo("second").event, '{"msg_type":"status","status":"finished"}'

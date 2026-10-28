@@ -1,4 +1,4 @@
-"""Regressions for job submission, waiting, and subscription ownership."""
+"""Tests for job submission, monitoring, and event subscriptions."""
 
 from __future__ import annotations
 
@@ -234,13 +234,14 @@ def test_unlisten_removes_only_selected_callback_and_preserves_monitoring(manage
     assert not manager.sub_client.registered_topics
 
 
-def test_removing_last_log_callback_unsubscribes_topic(manager):
+def test_removing_last_log_callback_preserves_global_log_monitoring(manager):
     future = submit(manager)
     callback_id = future.listen("log", lambda _: None)
     future.unlisten(callback_id)
     topic = TopicInfo(future._job_id).log
-    assert topic not in manager._job_tracker._active_subscriptions[future._job_id]
-    assert topic not in manager.sub_client.registered_topics
+    assert topic in manager._job_tracker._active_subscriptions[future._job_id]
+    assert topic in manager.sub_client.registered_topics
+    assert callback_id not in manager._job_tracker._topic_by_subscription_id
     assert TopicInfo(future._job_id).heartbeat in manager.sub_client.registered_topics
 
 
@@ -490,3 +491,109 @@ def test_shutdown_drains_all_received_log_callbacks(manager):
         for task in blocking:
             task.result(timeout=1)
     assert sorted(received, key=int) == [str(number) for number in range(25)]
+
+
+@pytest.mark.parametrize("event_type", ["log", "status", "heartbeat"])
+def test_manager_listener_receives_current_and_future_jobs(manager, event_type):
+    from queue import Queue
+
+    from slurm_manager.event_messages import LogMessage
+
+    messages = Queue()
+    current = submit(manager)
+    callback_ids = manager.listen(event_type, messages.put)
+    coming = submit(manager)
+    for future in (current, coming):
+        if event_type == "log":
+            message = LogMessage(log="progress")
+        elif event_type == "status":
+            message = StatusMessage(status="running")
+        else:
+            message = HeartBeatMessage(timestamp=time.time())
+        manager.sub_client._redis.publish(
+            TopicInfo(future._job_id).topic(event_type), message.model_dump_json()
+        )
+    received = [messages.get(timeout=1), messages.get(timeout=1)]
+    assert {message.metadata["job_id"] for message in received} == {current._job_id, coming._job_id}
+    assert all(message.msg_type == event_type for message in received)
+    assert len(callback_ids) == 1
+
+
+def test_manager_listener_before_first_job_receives_output_before_submit_returns(manager):
+    from queue import Queue
+
+    messages = Queue()
+    callback_ids = manager.listen("log", messages.put)
+    assert len(callback_ids) == 1
+
+    def release(_job_id):
+        future = next(iter(manager._job_tracker._future_registry.values()))
+        topic = TopicInfo(future._job_id).log
+        assert manager.sub_client._subscription_ready[topic].is_set()
+        manager.sub_client._redis.publish(topic, '{"msg_type":"log","log":"first output"}')
+        assert messages.get(timeout=1).log == "first output"
+
+    manager.rest_client.release.side_effect = release
+    submit(manager)
+
+
+def test_global_listener_survives_completion_and_notifies_next_job(manager):
+    from queue import Queue
+
+    messages = Queue()
+    manager.listen("status", messages.put)
+    for _ in range(2):
+        future = submit(manager)
+        manager._job_tracker.apply_status(StatusMessage(status="finished"), future)
+        message = messages.get(timeout=1)
+        assert message.status == "finished"
+        assert message.metadata["job_id"] == future._job_id
+        assert future.success()
+        assert not manager.sub_client.registered_topics
+
+
+def test_manager_unlisten_removes_global_callback_from_current_and_future_jobs(manager):
+    from queue import Queue
+
+    global_messages = Queue()
+    kept_messages = Queue()
+    removed_ids = manager.listen("log", global_messages.put)
+    manager.listen("log", kept_messages.put)
+    current = submit(manager)
+    manager.unlisten(removed_ids)
+    coming = submit(manager)
+    for future in (current, coming):
+        manager.sub_client._redis.publish(
+            TopicInfo(future._job_id).log, '{"msg_type":"log","log":"still monitored"}'
+        )
+    assert kept_messages.get(timeout=1).log == "still monitored"
+    assert kept_messages.get(timeout=1).log == "still monitored"
+    assert global_messages.empty()
+
+
+def test_job_specific_manager_listener_does_not_receive_other_jobs(manager):
+    from queue import Queue
+
+    specific_messages = Queue()
+    global_messages = Queue()
+    current = submit(manager)
+    manager.listen("log", specific_messages.put, job_id=current._job_id)
+    manager.listen("log", global_messages.put)
+    coming = submit(manager)
+    for future in (current, coming):
+        manager.sub_client._redis.publish(
+            TopicInfo(future._job_id).log, '{"msg_type":"log","log":"progress"}'
+        )
+    assert specific_messages.get(timeout=1).metadata["job_id"] == current._job_id
+    assert {global_messages.get(timeout=1).metadata["job_id"] for _ in range(2)} == {
+        current._job_id,
+        coming._job_id,
+    }
+    assert specific_messages.empty()
+
+
+def test_shutdown_clears_manager_wide_registrations(manager):
+    manager.listen("log", lambda message: None)
+    assert manager._job_tracker._global_callbacks
+    manager.shutdown(timeout=3)
+    assert not manager._job_tracker._global_callbacks
