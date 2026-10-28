@@ -188,18 +188,20 @@ class SlurmManager:
         job_future = self._job_tracker.get_future(job_id)
         self.rest_client.cancel(slurm_job_id)
 
-        if job_future:
-            self._job_tracker.apply_status(
-                StatusMessage(
-                    status="cancelled",
-                    metadata={
-                        "msg_received": datetime.now().isoformat(),
-                        "job_id": job_future._job_id,
-                        "slurm_job_id": job_future.slurm_job_id,
-                    },
-                ),
-                future=job_future,
-            )
+        if job_future is None:
+            return
+
+        self._job_tracker.apply_status(
+            StatusMessage(
+                status="cancelled",
+                metadata={
+                    "msg_received": datetime.now().isoformat(),
+                    "job_id": job_future._job_id,
+                    "slurm_job_id": job_future.slurm_job_id,
+                },
+            ),
+            future=job_future,
+        )
 
     ################################################
     #  Public Event Subscriptions                  #
