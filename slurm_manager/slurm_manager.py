@@ -46,11 +46,12 @@ def _job_exit_code(exit_code: Any) -> int | str | None:
 class SlurmManager:
     """Submit Slurm jobs and coordinate tracking and scheduler monitoring."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - connection and worker configuration
         self,
         redis_host: str = "localhost",
         redis_port: int = 6379,
         *,
+        redis_tls: bool = True,
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
@@ -61,6 +62,7 @@ class SlurmManager:
             redis_host (str): Redis hostname reachable by the submitter and compute
                 nodes.
             redis_port (int): Redis TCP port shared by the submitter and worker.
+            redis_tls (bool): Enable verified TLS for the subscriber and worker.
             env_file (str | Path): Local credential dotenv path. Environment variables
                 take precedence.
             rest_client (SlurmRestClient | None): Optional preconfigured REST client;
@@ -72,10 +74,14 @@ class SlurmManager:
         """
         if not worker_path.startswith("/"):
             raise ValueError("Worker path must be an absolute compute-node path")
+        self._redis_tls = redis_tls
         self.worker_path = worker_path
         self._redis_address = f"{redis_host}:{redis_port}"
         self.rest_client = rest_client if rest_client is not None else SlurmRestClient(env_file)
-        self.sub_client = RedisSubClient(bootstrap=f"{redis_host}:{redis_port}")
+        redis_options = {}
+        if redis_tls:
+            redis_options = {"ssl": True, "ssl_cert_reqs": "required", "ssl_check_hostname": True}
+        self.sub_client = RedisSubClient(bootstrap=self._redis_address, **redis_options)
         self._job_tracker = JobTracker(self.sub_client)
         self._stop_heartbeat_thread = threading.Event()
         # Heartbeat monitoring thread
@@ -141,6 +147,7 @@ class SlurmManager:
             job_id,
             worker_path=self.worker_path,
             redis_address=self._redis_address,
+            redis_tls=self._redis_tls,
         )
         job = JobOptions.model_validate(job_options or {}).to_rest()
         job.update(
@@ -339,13 +346,14 @@ class SlurmManager:
     ################################################
 
     @staticmethod
-    def _build_job_script(
+    def _build_job_script(  # noqa: PLR0913 - worker command and TLS configuration
         script_path: str | Path,
         env_path: str | Path | None,
         job_id: str,
         *,
         worker_path: str = "/usr/bin/bec-slurm-worker",
         redis_address: str = "localhost:6379",
+        redis_tls: bool = True,
     ) -> str:
         """Package local Bash file contents for the compute-node Go worker.
 
@@ -357,6 +365,7 @@ class SlurmManager:
             worker_path (str): Absolute path to the Go executable on compute nodes.
             redis_address (str): Redis host:port passed to the worker; no credentials are
                 embedded.
+            redis_tls (bool): Enable verified TLS in the worker.
 
         Returns:
             str: Batch script invoking the configured worker with JSON on standard input.
@@ -378,7 +387,15 @@ class SlurmManager:
             }
         )
         delimiter = f"SLURM_PAYLOAD_{uuid4().hex}"
-        command = shlex.join([worker_path, "--job-id", job_id, "--redis-address", redis_address])
+        args = [
+            worker_path,
+            "--job-id",
+            job_id,
+            "--redis-address",
+            redis_address,
+            f"--redis-tls={str(redis_tls).lower()}",
+        ]
+        command = shlex.join(args)
         return f"#!/bin/bash\nexec {command} <<'{delimiter}'\n{payload}\n{delimiter}\n"
 
     ################################################

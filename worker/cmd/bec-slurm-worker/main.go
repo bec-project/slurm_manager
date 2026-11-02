@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 func main() {
 	address := flag.String("redis-address", "localhost:6379", "Redis host:port")
+	redisTLS := flag.Bool("redis-tls", true, "Use TLS with certificate and hostname verification")
 	jobID := flag.String("job-id", "", "Opaque manager job ID used for Redis topics")
 	heartbeat := flag.Duration("heartbeat", time.Second, "Heartbeat interval")
 	grace := flag.Duration("grace", 5*time.Second, "Time to terminate workload before killing it")
@@ -29,7 +31,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Cannot decode job payload:", err)
 		os.Exit(2)
 	}
-	publisher := worker.NewRedisPublisher(*address)
+	tlsConfig := redisTLSConfig(*redisTLS)
+	publisher := worker.NewRedisPublisher(*address, tlsConfig)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	code, err := worker.Run(ctx, worker.Config{
 		JobID: *jobID, HeartbeatInterval: *heartbeat, GracePeriod: *grace,
@@ -41,4 +44,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bec-slurm-worker:", err)
 	}
 	os.Exit(code)
+}
+
+// redisTLSConfig verifies the server certificate using system trust.
+func redisTLSConfig(enabled bool) *tls.Config {
+	if !enabled {
+		return nil
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12}
 }

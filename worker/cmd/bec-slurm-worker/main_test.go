@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/bec-project/slurm_manager/worker/internal/worker"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -18,7 +23,7 @@ func TestCLIHelper(t *testing.T) {
 	if os.Getenv("SLURM_WORKER_TEST_HELPER") != "1" {
 		return
 	}
-	os.Args = []string{"bec-slurm-worker", "--job-id", "cli-job", "--redis-address", os.Getenv("BEC_SLURM_WORKER_TEST_REDIS")}
+	os.Args = []string{"bec-slurm-worker", "--job-id", "cli-job", "--redis-tls=false", "--redis-address", os.Getenv("BEC_SLURM_WORKER_TEST_REDIS")}
 	main()
 }
 
@@ -65,6 +70,66 @@ func TestCLIExecutesUploadedPayload(t *testing.T) {
 				t.Fatal("terminal status arrived without stdout")
 			}
 			return
+		}
+	}
+}
+
+func TestRedisTLSConfig(t *testing.T) {
+	config := redisTLSConfig(true)
+	if config == nil || config.InsecureSkipVerify || config.MinVersion < tls.VersionTLS12 || config.RootCAs != nil || len(config.Certificates) != 0 {
+		t.Fatalf("invalid system-trust config: %+v", config)
+	}
+	if config := redisTLSConfig(false); config != nil {
+		t.Fatalf("plaintext config: %+v", config)
+	}
+}
+
+func TestWorkerTLSFeedback(t *testing.T) {
+	// httptest supplies a short-lived test certificate valid for 127.0.0.1.
+	certServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	cert := certServer.TLS.Certificates[0]
+	certServer.Close()
+	server := miniredis.NewMiniRedis()
+	if err := server.StartTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	// Trust the self-signed fixture only for this test; production uses system trust.
+	roots := x509.NewCertPool()
+	roots.AddCert(certServer.Certificate())
+	config := redisTLSConfig(true)
+	config.RootCAs = roots
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr(), TLSConfig: config, Protocol: 2, DisableIdentity: true})
+	defer client.Close()
+	sub := client.Subscribe(ctx, "info/cli-job/status")
+	defer sub.Close()
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	publisher := worker.NewRedisPublisher(server.Addr(), config)
+	defer publisher.Close()
+	code, err := worker.Run(ctx, worker.Config{JobID: "cli-job", HeartbeatInterval: time.Second, GracePeriod: time.Second}, worker.Payload{Script: "true"}, publisher)
+	if code != 0 || err != nil {
+		t.Fatalf("worker failed: %d %v", code, err)
+	}
+	for {
+		message, err := sub.ReceiveMessage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(message.Payload, `"status":"finished"`) {
+			break
+		}
+	}
+	// Neither an untrusted certificate nor a wrong hostname may be accepted.
+	for _, config := range []*tls.Config{{MinVersion: tls.VersionTLS12}, {RootCAs: config.RootCAs, ServerName: "wrong.example", MinVersion: tls.VersionTLS12}} {
+		publisher := worker.NewRedisPublisher(server.Addr(), config)
+		err := publisher.Publish(ctx, "info/test/status", map[string]any{"status": "finished"})
+		publisher.Close()
+		if err == nil {
+			t.Fatal("unverified TLS connection succeeded")
 		}
 	}
 }

@@ -597,3 +597,39 @@ def test_shutdown_clears_manager_wide_registrations(manager):
     assert manager._job_tracker._global_callbacks
     manager.shutdown(timeout=3)
     assert not manager._job_tracker._global_callbacks
+
+
+@pytest.mark.parametrize("tls", [True, False])
+def test_redis_transport_reaches_subscriber_and_worker(tmp_path, tls):
+    workload = tmp_path / "job.sh"
+    workload.write_text("true\n")
+    client = RedisSubClient(redis_cls=fakeredis.FakeRedis)
+    rest = mock.Mock(spec=SlurmRestClient)
+    rest.submit.return_value = {"job_id": 123}
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient", return_value=client) as ctor:
+        manager = SlurmManager(redis_host="redis.example", rest_client=rest, redis_tls=tls)
+    try:
+        expected = {"bootstrap": "redis.example:6379"}
+        if tls:
+            expected.update(ssl=True, ssl_cert_reqs="required", ssl_check_hostname=True)
+        ctor.assert_called_once_with(**expected)
+        with mock.patch.object(manager._job_tracker, "wait_until_ready"):
+            manager.submit_job(workload, working_directory="/remote/work")
+        script = rest.submit.call_args.args[0]
+        assert f"--redis-tls={str(tls).lower()}" in script
+    finally:
+        manager.shutdown(timeout=3)
+
+
+def test_tls_uses_system_trust_by_default():
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient") as ctor:
+        manager = SlurmManager(rest_client=mock.Mock(spec=SlurmRestClient))
+        try:
+            ctor.assert_called_once_with(
+                bootstrap="localhost:6379",
+                ssl=True,
+                ssl_cert_reqs="required",
+                ssl_check_hostname=True,
+            )
+        finally:
+            manager.shutdown(timeout=3)

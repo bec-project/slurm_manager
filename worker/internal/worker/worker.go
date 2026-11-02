@@ -4,6 +4,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,10 +49,10 @@ type Publisher interface {
 type RedisPublisher struct{ client *redis.Client }
 
 // NewRedisPublisher configures a Redis host:port without opening a connection.
-// The first Publish connects; requests have a three-second deadline and no retries.
-func NewRedisPublisher(address string) *RedisPublisher {
+// A nil TLS config explicitly selects plaintext. The first Publish connects; requests have a three-second deadline and no retries.
+func NewRedisPublisher(address string, tlsConfig *tls.Config) *RedisPublisher {
 	return &RedisPublisher{client: redis.NewClient(&redis.Options{
-		Addr: address, Protocol: 2, MaxRetries: -1, PoolSize: 1,
+		Addr: address, TLSConfig: tlsConfig, Protocol: 2, MaxRetries: -1, PoolSize: 1,
 		DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second,
 		ContextTimeoutEnabled: true, DisableIdentity: true,
 	})}
