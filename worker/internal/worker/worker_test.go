@@ -202,7 +202,7 @@ func TestRedisWireFeedbackWithoutPing(t *testing.T) {
 	if _, err := subscription.Receive(ctx); err != nil {
 		t.Fatal(err)
 	}
-	publisher := NewRedisPublisher(server.Addr())
+	publisher := NewRedisPublisher(server.Addr(), nil)
 	defer publisher.Close()
 	var out, errout bytes.Buffer
 	code, err := Run(ctx, config(&out, &errout), Payload{Script: "printf 'hello Redis\n'; printf 'stderr tail' >&2\n"}, publisher)

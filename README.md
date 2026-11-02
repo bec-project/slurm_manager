@@ -18,6 +18,17 @@ and API version. This credential file is ignored by Git and never uploaded.
 The submitter needs access to slurmrestd and Redis.
 For development from a checkout, install with `pip install -e '.[dev]'`.
 
+## Redis TLS
+
+Redis connections use TLS by default, including the worker on compute nodes.
+Certificates and hostnames are verified against each machine's system trust store.
+Set `redis_port` to the server's TLS listener port if it differs from 6379.
+Clients do not need their own certificate or a certificate path.
+For a local plaintext Redis server, explicitly pass `redis_tls=False`.
+The standalone worker likewise defaults to TLS; use `--redis-tls=false` for plaintext.
+Upgrade the worker executable on compute nodes together with the Python package
+because submitted scripts now pass the TLS flag.
+
 ## Simple job
 
 Run the included ten-second Bash script using the cluster's default resources:
