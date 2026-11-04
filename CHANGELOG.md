@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v1.1.0 (2026-11-04)
+
+### Features
+
+- Enable verified Redis TLS for manager and worker
+  ([`230cf57`](https://github.com/bec-project/slurm_manager/commit/230cf570cecff02dbaeb1f9be9a6b10c9cea160d))
+
+
 ## v1.0.1 (2026-10-28)
 
 ### Bug Fixes
