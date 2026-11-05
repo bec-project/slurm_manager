@@ -4,6 +4,16 @@ Compute-node executable for Slurm Manager. It runs one uploaded Bash workload
 and forwards stdout, stderr, lifecycle status, and heartbeats to Redis.
 It is launched by Slurm Manager, not as a system service.
 
+The worker reads `job_id`, `script`, and `activation` from a JSON object on stdin.
+The job ID is kept out of process arguments; the `--job-id` flag is no longer supported.
+Upgrade the worker and Python package together. The ID remains in the submitted
+Slurm batch script, which must be protected from other users.
+
+Activation and workload scripts receive the job ID as `SLURM_WORKER_JOBID` in
+their environment, including child processes. The worker does not log the payload
+or print this variable automatically. Scripts that print their environment expose
+the ID in Slurm output and Redis logs.
+
 ## Builds
 
 With Go installed, `make build` creates `../dist/bec-slurm-worker-linux-amd64`.

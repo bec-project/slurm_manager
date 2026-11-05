@@ -27,7 +27,7 @@ Clients do not need their own certificate or a certificate path.
 For a local plaintext Redis server, explicitly pass `redis_tls=False`.
 The standalone worker likewise defaults to TLS; use `--redis-tls=false` for plaintext.
 Upgrade the worker executable on compute nodes together with the Python package
-because submitted scripts now pass the TLS flag.
+because the job ID is now sent in the JSON payload on stdin instead of a command-line flag.
 
 ## Simple job
 

@@ -375,13 +375,15 @@ class SlurmManager:
             ValueError: The worker path is not an absolute compute-node path.
 
         Notes:
-            The payload contains only the selected workload and activation scripts, not the
-            credential dotenv file. Staging and cleanup belong to the worker.
+            The payload contains the job ID and selected workload and activation scripts,
+            not the credential dotenv file. The job ID is kept out of process arguments.
+            Staging and cleanup belong to the worker.
         """
         if not worker_path.startswith("/"):
             raise ValueError("Worker path must be an absolute compute-node path")
         payload = json.dumps(
             {
+                "job_id": job_id,
                 "script": Path(script_path).read_text(),
                 "activation": Path(env_path).read_text() if env_path is not None else "",
             }
@@ -389,8 +391,6 @@ class SlurmManager:
         delimiter = f"SLURM_PAYLOAD_{uuid4().hex}"
         args = [
             worker_path,
-            "--job-id",
-            job_id,
             "--redis-address",
             redis_address,
             f"--redis-tls={str(redis_tls).lower()}",

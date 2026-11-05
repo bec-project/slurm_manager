@@ -99,6 +99,31 @@ func TestScriptsOutputAndCleanup(t *testing.T) {
 		})
 	}
 }
+func TestJobIDEnvironment(t *testing.T) {
+	// An inherited value must not override this job's identity.
+	t.Setenv("SLURM_WORKER_JOBID", "previous-job")
+	var out, errout bytes.Buffer
+	p := &fakePublisher{}
+	payload := Payload{
+		Activation: `test "$SLURM_WORKER_JOBID" = test-job`,
+		Script: `test "$SLURM_WORKER_JOBID" = test-job || exit 91
+/bin/bash -c 'test "$SLURM_WORKER_JOBID" = test-job'
+`,
+	}
+	code, err := Run(context.Background(), config(&out, &errout), payload, p)
+	if code != 0 || err != nil {
+		t.Fatalf("exit=%d err=%v stderr=%s", code, err, errout.String())
+	}
+	if out.Len() != 0 || errout.Len() != 0 {
+		t.Fatalf("unexpected output: stdout=%q stderr=%q", out.String(), errout.String())
+	}
+	for _, event := range p.events {
+		if event.message["msg_type"] == "log" {
+			t.Fatalf("unexpected log message: %v", event.message)
+		}
+	}
+}
+
 func TestHeartbeatsWhileRunning(t *testing.T) {
 	var out, errout bytes.Buffer
 	p := &fakePublisher{}
