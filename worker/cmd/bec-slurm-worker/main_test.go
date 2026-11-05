@@ -23,7 +23,7 @@ func TestCLIHelper(t *testing.T) {
 	if os.Getenv("SLURM_WORKER_TEST_HELPER") != "1" {
 		return
 	}
-	os.Args = []string{"bec-slurm-worker", "--job-id", "cli-job", "--redis-tls=false", "--redis-address", os.Getenv("BEC_SLURM_WORKER_TEST_REDIS")}
+	os.Args = []string{"bec-slurm-worker", "--redis-tls=false", "--redis-address", os.Getenv("BEC_SLURM_WORKER_TEST_REDIS")}
 	main()
 }
 
@@ -44,7 +44,7 @@ func TestCLIExecutesUploadedPayload(t *testing.T) {
 	}
 	command := exec.CommandContext(ctx, executable, "-test.run=^TestCLIHelper$")
 	command.Env = append(os.Environ(), "SLURM_WORKER_TEST_HELPER=1", "BEC_SLURM_WORKER_TEST_REDIS="+server.Addr())
-	command.Stdin = strings.NewReader(`{"script":"printf 'hello from CLI\\n'","activation":"export WORKLOAD_TEST=1"}`)
+	command.Stdin = strings.NewReader(`{"job_id":"cli-job","script":"test \"$SLURM_WORKER_JOBID\" = cli-job || exit 91; printf 'hello from CLI\\n'","activation":"export WORKLOAD_TEST=1"}`)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v: %s", err, output)
@@ -71,6 +71,33 @@ func TestCLIExecutesUploadedPayload(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestCLIRejectsMissingJobID(t *testing.T) {
+	for _, payload := range []string{
+		`{"script":"true","activation":""}`,
+		`{"job_id":"","script":"true","activation":""}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestCLIHelper$")
+			command.Env = append(os.Environ(), "SLURM_WORKER_TEST_HELPER=1")
+			command.Stdin = strings.NewReader(payload)
+			output, err := command.CombinedOutput()
+			exitError, ok := err.(*exec.ExitError)
+			if !ok || exitError.ExitCode() != 2 {
+				t.Fatalf("expected exit code 2, got %v: %s", err, output)
+			}
+			if !strings.Contains(string(output), "Job payload must contain a nonempty job_id") {
+				t.Fatalf("unexpected validation error: %s", output)
+			}
+		})
 	}
 }
 

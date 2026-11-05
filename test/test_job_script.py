@@ -28,16 +28,13 @@ def test_local_scripts_are_passed_to_worker_as_json(tmp_path):
     )
     received = json.loads(result.stdout)
     assert received["payload"] == {
+        "job_id": "job-id",
         "script": workload.read_text(),
         "activation": activation.read_text(),
     }
-    assert received["args"] == [
-        "--job-id",
-        "job-id",
-        "--redis-address",
-        "redis.example:6380",
-        "--redis-tls=true",
-    ]
+    assert received["args"] == ["--redis-address", "redis.example:6380", "--redis-tls=true"]
+    assert "job-id" not in received["args"]
+    assert "job-id" not in script.splitlines()[1]
     assert str(workload) not in script
     assert not (tmp_path / "must-not-exist").exists()
 

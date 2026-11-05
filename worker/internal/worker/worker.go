@@ -23,8 +23,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Payload contains only the user scripts, never the submitter's credentials.
+// Payload carries the job identity and user scripts over stdin, never the submitter's credentials.
 type Payload struct {
+	JobID      string `json:"job_id"`
 	Script     string `json:"script"`
 	Activation string `json:"activation"`
 }
@@ -164,7 +165,7 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 	stdout := &lineWriter{local: config.Stdout, stream: "stdout", publish: publish, onError: cancelWork}
 	stderr := &lineWriter{local: config.Stderr, stream: "stderr", publish: publish, onError: cancelWork}
 	command := exec.Command("/bin/bash", "-c", shellSetup, "bec-slurm-worker", activation, script)
-	command.Env = append(os.Environ(), "HOME="+home)
+	command.Env = append(os.Environ(), "HOME="+home, "SLURM_WORKER_JOBID="+config.JobID)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdout, command.Stderr = stdout, stderr
 	command.WaitDelay = config.GracePeriod
