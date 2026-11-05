@@ -5,8 +5,7 @@ and forwards stdout, stderr, lifecycle status, and heartbeats to Redis.
 It is launched by Slurm Manager, not as a system service.
 
 The worker reads `job_id`, `script`, and `activation` from a JSON object on stdin.
-The job ID is kept out of process arguments; the `--job-id` flag is no longer supported.
-Upgrade the worker and Python package together. The ID remains in the submitted
+The job ID is kept out of process arguments. The ID remains in the submitted
 Slurm batch script, which must be protected from other users.
 
 Activation and workload scripts receive the job ID as `SLURM_WORKER_JOBID` in
@@ -16,7 +15,7 @@ the ID in Slurm output and Redis logs.
 
 ## Builds
 
-With Go installed, `make build` creates `../dist/bec-slurm-worker-linux-amd64`.
+With Go 1.27.3 or later installed, `make build` creates `../dist/bec-slurm-worker-linux-amd64`.
 Use `TARGET_ARCH=arm64` for ARM64.
 
 With GoReleaser 2.18.0 installed, `make package VERSION=0.2.0` creates static Linux
