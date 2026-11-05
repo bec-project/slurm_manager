@@ -1,6 +1,19 @@
 # CHANGELOG
 
 
+## v1.1.1 (2026-11-05)
+
+### Bug Fixes
+
+- Pass worker job identity through stdin
+  ([`0a74739`](https://github.com/bec-project/slurm_manager/commit/0a74739b6a8b0c897e08018579d76e3b7e9e1f88))
+
+### Build System
+
+- Use latest Go 1.27 patch for worker
+  ([`09e66b6`](https://github.com/bec-project/slurm_manager/commit/09e66b653928ef22df1de91369a6532d90fa4ae7))
+
+
 ## v1.1.0 (2026-11-04)
 
 ### Features
