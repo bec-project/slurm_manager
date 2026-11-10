@@ -49,7 +49,7 @@ class RedisSubClient:
     def __init__(
         self,
         bootstrap: str | list[str] = "localhost:6379",
-        redis_cls: type[Redis] = Redis,
+        redis_cls: Callable[..., Redis] = Redis,
         **redis_kwargs: Any,
     ) -> None:
         """Create Redis resources without starting the listener until subscribed.
@@ -57,7 +57,7 @@ class RedisSubClient:
         Args:
             bootstrap (str | list[str]): Redis host:port or a nonempty address list;
                 only the first entry is used.
-            redis_cls (type[Redis]): Redis client implementation, injectable for tests.
+            redis_cls (Callable[..., Redis]): Redis client factory, injectable for tests.
             **redis_kwargs (Any): Additional Redis constructor options such as socket
                 timeouts.
 

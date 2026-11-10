@@ -10,8 +10,8 @@ there are no automatic submission retries.
 
 from pathlib import Path
 
-from slurm_manager.event_messages import LogMessage
-from slurm_manager.job_options import JobOptions
+from slurm_manager.clusters.ra import RAJobOptions
+from slurm_manager.event_messages import LogMessage, SlurmMessage
 from slurm_manager.slurm_manager import SlurmManager
 
 
@@ -32,22 +32,23 @@ def main(
     """
     lines = []
 
-    def log(message: LogMessage) -> None:
+    def log(message: SlurmMessage) -> None:
         """Record and print a message delivered through the job's Redis log channel.
 
         Args:
-            message (LogMessage): Parsed worker stdout or stderr message.
+            message (SlurmMessage): Parsed worker stdout or stderr message.
         """
-        lines.append(message.log)
-        print(message.log, flush=True)
+        if isinstance(message, LogMessage):
+            lines.append(message.log)
+            print(message.log, flush=True)
 
-    manager = SlurmManager(redis_host="bec-slurm.psi.ch", worker_path=worker_path)
+    manager = SlurmManager.for_cluster("ra", env_file=".env", worker_path=worker_path)
     try:
         job = manager.submit_job(
             script_path=script_path,
             working_directory=working_directory,
             callbacks={"log": log},
-            job_options=JobOptions(
+            job_options=RAJobOptions(
                 name="slurm-manager-redis-stdout-smoke",
                 tasks=1,
                 time_limit_minutes=1,

@@ -64,13 +64,24 @@ class SlurmRestClient:
     request so replacing an expired token does not require restarting a manager.
     """
 
-    def __init__(self, env_file: str | Path = ".env", timeout: float = 30) -> None:
+    def __init__(
+        self,
+        env_file: str | Path = ".env",
+        timeout: float = 30,
+        *,
+        rest_url: str | None = None,
+        api_version: str | None = None,
+        use_environment: bool = True,
+    ) -> None:
         """Load and validate slurmrestd connection settings.
 
         Args:
             env_file (str | Path): Local credential dotenv path. Environment variables
                 take precedence.
             timeout (float): Positive HTTP request timeout in seconds.
+            rest_url: Explicit endpoint, overriding connection settings from dotenv or environment.
+            api_version: Explicit REST version.
+            use_environment: Allow process-wide environment overrides for dotenv values.
 
         Raises:
             ValueError: The URL, API version, token, or timeout is invalid.
@@ -79,14 +90,19 @@ class SlurmRestClient:
         if timeout <= 0:
             raise ValueError("REST timeout must be positive")
         self.timeout = timeout
+        self._use_environment = use_environment
         settings = self._settings()
-        self.url = settings.get("SLURM_REST_URL", "").rstrip("/")
+        self.url = (settings["SLURM_REST_URL"] if rest_url is None else rest_url).rstrip("/")
         parsed = urlsplit(self.url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("Set SLURM_REST_URL to the slurmrestd HTTP(S) URL")
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("SLURM_REST_URL must not contain credentials, query, or fragment")
-        self.api_version = settings.get("SLURM_REST_API_VERSION") or "v0.0.44"
+        self.api_version = (
+            (settings["SLURM_REST_API_VERSION"] or "v0.0.44")
+            if api_version is None
+            else api_version
+        )
         if not re.fullmatch(r"v\d+\.\d+\.\d+", self.api_version):
             raise ValueError("SLURM_REST_API_VERSION must look like v0.0.44")
         self._headers(settings)
@@ -249,7 +265,10 @@ class SlurmRestClient:
         """
         values = dotenv_values(self.env_file, interpolate=False)
         keys = ("SLURM_REST_URL", "SLURM_REST_API_VERSION", "SLURM_JWT", "SLURM_USER")
-        return {key: os.environ.get(key, values.get(key) or "") for key in keys}
+        settings = {key: values.get(key) or "" for key in keys}
+        if self._use_environment:
+            return {key: os.environ.get(key, value) for key, value in settings.items()}
+        return settings
 
     @staticmethod
     def _headers(settings: dict[str, str]) -> dict[str, str]:
@@ -267,7 +286,7 @@ class SlurmRestClient:
         """
         token = settings.get("SLURM_JWT", "")
         if not token:
-            raise ValueError("Set SLURM_JWT in the local .env file or environment")
+            raise ValueError("Set SLURM_JWT in the credential file or enabled environment")
         headers = {"X-SLURM-USER-TOKEN": token, "Accept": "application/json"}
         if settings.get("SLURM_USER"):
             headers["X-SLURM-USER-NAME"] = settings["SLURM_USER"]

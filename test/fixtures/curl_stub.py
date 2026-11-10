@@ -2,6 +2,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import NotRequired, TypedDict
+
+
+class RegistryState(TypedDict):
+    files: dict[str, str]
+    failed: NotRequired[bool]
 
 
 def main() -> None:
@@ -13,7 +19,9 @@ def main() -> None:
     if os.environ.get("MOCK_CURL_EXIT"):
         sys.exit(int(os.environ["MOCK_CURL_EXIT"]))
     state_path = Path(os.environ["MOCK_CURL_STATE"])
-    state = json.loads(state_path.read_text()) if state_path.exists() else {"files": {}}
+    state: RegistryState = (
+        json.loads(state_path.read_text()) if state_path.exists() else {"files": {}}
+    )
     url = args[-1]
     body = b""
     if "--upload-file" in args:

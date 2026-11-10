@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from slurm_manager.event_messages import SlurmMessage
 
@@ -48,7 +48,7 @@ class JobFuture:
     """
 
     def __init__(
-        self, job_id: str, manager: SlurmManager, slurm_job_id: str, name: str | None = None
+        self, job_id: str, manager: SlurmManager[Any], slurm_job_id: str, name: str | None = None
     ) -> None:
         """Create a future for one job tracked by its submitting manager.
 
@@ -113,11 +113,11 @@ class JobFuture:
         """
         return self._future.done() and self._future.exception() is None
 
-    def exception(self) -> Exception | None:
+    def exception(self) -> BaseException | None:
         """Return the recorded terminal exception without waiting.
 
         Returns:
-            Exception | None: Failure or cancellation exception, or None if pending or
+            BaseException | None: Failure or cancellation exception, or None if pending or
                 successful.
         """
         if self._future.done():

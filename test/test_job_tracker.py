@@ -10,6 +10,7 @@ from slurm_manager.event_messages import StatusMessage
 from slurm_manager.job_future import JobFuture
 from slurm_manager.job_tracker import JobTracker, TopicInfo
 from slurm_manager.redis_sub_client import RedisSubClient
+from slurm_manager.slurm_manager import SlurmManager
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def tracker():
 
 
 def test_heartbeat_snapshots_cannot_mutate_tracking_state(tracker):
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     with mock.patch("slurm_manager.job_tracker.time.time", return_value=80):
         tracker.track(future)
 
@@ -36,8 +37,8 @@ def test_heartbeat_snapshots_cannot_mutate_tracking_state(tracker):
 
 
 def test_completion_preserves_other_jobs_and_their_redis_subscriptions(tracker):
-    first = JobFuture("first", manager=None, slurm_job_id="123")
-    second = JobFuture("second", manager=None, slurm_job_id="124")
+    first = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
+    second = JobFuture("second", manager=mock.Mock(spec=SlurmManager), slurm_job_id="124")
     tracker.track(first)
     tracker.track(second)
     tracker.wait_until_ready("second")
@@ -61,7 +62,7 @@ def test_completion_preserves_other_jobs_and_their_redis_subscriptions(tracker):
 
 
 def test_scheduler_check_skips_a_job_removed_after_snapshot(tracker):
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
     tracker.apply_status(StatusMessage(status="finished"), future)
 
@@ -71,7 +72,7 @@ def test_scheduler_check_skips_a_job_removed_after_snapshot(tracker):
 
 @pytest.mark.parametrize("status", ["finished", "cancelled", "error:workload failed", "unknown"])
 def test_synthesized_terminal_status_notifies_listeners_once(tracker, status):
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
     received = []
     tracker.add_subscription("first", "status", received.append)
@@ -93,7 +94,7 @@ def test_synthesized_terminal_status_notifies_listeners_once(tracker, status):
 
 
 def test_redis_status_is_dispatched_once_and_shutdown_drains_it(tracker):
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
     received = []
     tracker.add_subscription("first", "status", received.append)
@@ -108,7 +109,7 @@ def test_redis_status_is_dispatched_once_and_shutdown_drains_it(tracker):
 
 
 def test_removing_tracking_reports_failure_to_status_listeners(tracker):
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
     received = []
     tracker.add_subscription("first", "status", received.append)
@@ -125,7 +126,7 @@ def test_removing_tracking_reports_failure_to_status_listeners(tracker):
 def test_callback_errors_are_logged_without_stopping_other_callbacks(tracker, caplog):
     import threading
 
-    future = JobFuture("first", manager=None, slurm_job_id="123")
+    future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
     received = threading.Event()
 

@@ -9,17 +9,22 @@ from collections.abc import Callable
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Generic, Literal, overload
 from uuid import uuid4
 
+from typing_extensions import TypeVar
+
+from slurm_manager.clusters import Cluster, ra, sfonline, slsonline
+from slurm_manager.clusters.job_options import JobOptions
 from slurm_manager.event_messages import SlurmMessage, StatusMessage
 from slurm_manager.job_future import JobFuture, JobStatus
-from slurm_manager.job_options import JobOptions
 from slurm_manager.job_tracker import JobTracker, SubscriptionInfo
 from slurm_manager.redis_sub_client import RedisSubClient
 from slurm_manager.slurm_rest_client import SlurmRestClient, SlurmRestError
 
 logger = getLogger(__name__)
+
+_JobOptionsT = TypeVar("_JobOptionsT", bound=JobOptions, default=JobOptions)
 
 
 def _job_exit_code(exit_code: Any) -> int | str | None:
@@ -43,8 +48,34 @@ def _job_exit_code(exit_code: Any) -> int | str | None:
     return code if not signal else f"signal {signal}"
 
 
-class SlurmManager:
+class SlurmManager(Generic[_JobOptionsT]):
     """Submit Slurm jobs and coordinate tracking and scheduler monitoring."""
+
+    @overload
+    def __init__(
+        self: SlurmManager[JobOptions],
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        *,
+        redis_tls: bool = True,
+        env_file: str | Path = ".env",
+        rest_client: SlurmRestClient | None = None,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+        job_options_type: None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        *,
+        redis_tls: bool = True,
+        env_file: str | Path = ".env",
+        rest_client: SlurmRestClient | None = None,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+        job_options_type: type[_JobOptionsT],
+    ) -> None: ...
 
     def __init__(  # noqa: PLR0913 - connection and worker configuration
         self,
@@ -55,6 +86,7 @@ class SlurmManager:
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
+        job_options_type: type[_JobOptionsT] | None = None,
     ) -> None:
         """Create REST/Redis clients and start background job monitoring.
 
@@ -68,12 +100,14 @@ class SlurmManager:
             rest_client (SlurmRestClient | None): Optional preconfigured REST client;
                 None creates one from env_file.
             worker_path (str): Absolute path to the Go executable on compute nodes.
+            job_options_type: Model used to validate submissions for this manager.
 
         Raises:
             ValueError: The worker path or REST connection settings are invalid.
         """
         if not worker_path.startswith("/"):
             raise ValueError("Worker path must be an absolute compute-node path")
+        self._job_options_type = JobOptions if job_options_type is None else job_options_type
         self._redis_tls = redis_tls
         self.worker_path = worker_path
         self._redis_address = f"{redis_host}:{redis_port}"
@@ -90,6 +124,74 @@ class SlurmManager:
         )
         self._start_threads()
 
+    @overload
+    @staticmethod
+    def for_cluster(
+        cluster: Literal["ra", Cluster.RA],
+        *,
+        env_file: str | Path,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+    ) -> SlurmManager[ra.RAJobOptions]: ...
+
+    @overload
+    @staticmethod
+    def for_cluster(
+        *, env_file: str | Path, worker_path: str = "/usr/bin/bec-slurm-worker"
+    ) -> SlurmManager[ra.RAJobOptions]: ...
+
+    @overload
+    @staticmethod
+    def for_cluster(
+        cluster: Literal["sfonline", "SFOnline", Cluster.SFONLINE],
+        *,
+        env_file: str | Path,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+    ) -> SlurmManager[sfonline.SFOnlineJobOptions]: ...
+
+    @overload
+    @staticmethod
+    def for_cluster(
+        cluster: Literal["slsonline", "SLSOnline", Cluster.SLSONLINE],
+        *,
+        env_file: str | Path,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+    ) -> SlurmManager[slsonline.SLSOnlineJobOptions]: ...
+
+    @staticmethod
+    def for_cluster(
+        cluster: str = Cluster.RA,
+        *,
+        env_file: str | Path,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
+    ) -> SlurmManager[Any]:
+        """Create a manager bound to a built-in cluster using a local credential file."""
+        options_type: type[JobOptions]
+        match cluster:
+            case Cluster.RA:
+                info = ra.CLUSTER_INFO
+                options_type = ra.RAJobOptions
+            case Cluster.SFONLINE | "SFOnline":
+                info = sfonline.CLUSTER_INFO
+                options_type = sfonline.SFOnlineJobOptions
+            case Cluster.SLSONLINE | "SLSOnline":
+                info = slsonline.CLUSTER_INFO
+                options_type = slsonline.SLSOnlineJobOptions
+            case _:
+                raise ValueError(
+                    f"Unknown Slurm cluster {cluster!r}; supported clusters: ra, sfonline, slsonline"
+                )
+        rest_client = SlurmRestClient(
+            env_file, rest_url=info.url, api_version=info.api_version, use_environment=False
+        )
+        return SlurmManager(
+            info.redis_host,
+            info.redis_port,
+            redis_tls=info.redis_tls,
+            worker_path=worker_path,
+            rest_client=rest_client,
+            job_options_type=options_type,
+        )
+
     ################################################
     #  Public Job Management                       #
     ################################################
@@ -100,7 +202,7 @@ class SlurmManager:
         env_path: str | Path | None = None,
         *,
         working_directory: str,
-        job_options: JobOptions | None = None,
+        job_options: _JobOptionsT | None = None,
         callbacks: dict[Literal["log", "status", "heartbeat"], Callable[[SlurmMessage], None]]
         | None = None,
     ) -> JobFuture:
@@ -138,8 +240,10 @@ class SlurmManager:
         """
         if not working_directory.startswith("/"):
             raise ValueError("Working directory must be an absolute compute-node path")
-        if callbacks and set(callbacks) - {"log", "status", "heartbeat"}:
+        if callbacks and set(callbacks).difference({"log", "status", "heartbeat"}):
             raise ValueError("Callbacks must use log, status, or heartbeat keys")
+        options = job_options.model_dump() if isinstance(job_options, JobOptions) else job_options
+        job = self._job_options_type.model_validate({} if options is None else options).to_rest()
         job_id = str(uuid4())
         script = self._build_job_script(
             script_path,
@@ -149,7 +253,6 @@ class SlurmManager:
             redis_address=self._redis_address,
             redis_tls=self._redis_tls,
         )
-        job = JobOptions.model_validate(job_options or {}).to_rest()
         job.update(
             {
                 "current_working_directory": working_directory,

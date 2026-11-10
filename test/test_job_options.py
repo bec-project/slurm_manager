@@ -3,7 +3,8 @@
 import pytest
 from pydantic import ValidationError
 
-from slurm_manager.job_options import JobOptions
+from slurm_manager.clusters.job_options import JobOptions
+from slurm_manager.clusters.ra import RAJobOptions
 
 
 @pytest.mark.parametrize(
@@ -42,10 +43,14 @@ def test_runtime_uses_minutes_and_slurm_optional_number_shape():
 
 @pytest.mark.parametrize("partition", ["hour", "day", "week", "gpu"])
 def test_supported_ra_partitions(partition):
-    assert JobOptions(partition=partition).to_rest()["partition"] == partition
+    assert RAJobOptions(partition=partition).to_rest()["partition"] == partition
 
 
 @pytest.mark.parametrize("partition", ["admin", "jupyter", "gpu-large", "unknown"])
-def test_unsupported_partitions_are_rejected(partition):
+def test_unsupported_ra_partitions_are_rejected(partition):
     with pytest.raises(ValidationError):
-        JobOptions(partition=partition)
+        RAJobOptions.model_validate({"partition": partition})
+
+
+def test_generic_job_options_accept_a_custom_partition():
+    assert JobOptions(partition="batch").to_rest()["partition"] == "batch"
