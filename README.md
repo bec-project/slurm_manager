@@ -69,7 +69,9 @@ try:
             name="my-analysis",
             partition="day",
             tasks=1,
-            time_limit_minutes=120,
+            cpus_per_task=4,
+            memory_per_node=8192,
+            time_limit=120,
             standard_output="/das/home/your_username/slurm_logs/%j.out",
             standard_error="/das/home/your_username/slurm_logs/%j.err",
         ),
@@ -97,7 +99,32 @@ limit. `RAJobOptions` also
 accepts `account` and `qos`. Requesting tasks reserves a Slurm allocation; the
 workload script runs once and must launch any parallel processes itself.
 
-`time_limit_minutes` limits job runtime in minutes. `job.wait(timeout=...)` limits
+Use `reservation` to name an existing Slurm reservation and `cpus_per_task` to
+request CPUs per task. Choose either `memory_per_cpu` or
+`memory_per_node`, both measured in MiB. A per-node value of `0` requests all
+memory on each node. Use `exclusive=True` to request exclusive nodes or
+`shared` to set a Slurm sharing mode explicitly. Slurm still applies the
+requested memory amount or its default.
+
+Use `nodes` for a node count or range such as `"2-4"`, and `tasks_per_node` for
+task placement. With `tasks_per_node` set, omit `tasks` to let Slurm infer the
+total. Otherwise, omitted `tasks` defaults to one. Use `tasks_per_core` to
+limit tasks per CPU core, or set it to `65535` for no per-core limit. Use
+`tres_per_node` or `tres_per_task` to request resources such as GPUs,
+`constraints` to select nodes by feature, and `dependency` to wait for other
+jobs, for example `"afterok:12345"`.
+
+To submit a job that runs after earlier jobs succeed, pass their returned
+futures to `submit_job(..., after_ok=prepare)` or
+`submit_job(..., after_ok=[prepare, calibrate])`. Use `after_any` to wait until
+all of those jobs finish, regardless of outcome. You can combine `after_ok`
+and `after_any` to require both conditions. Use futures returned by the
+same manager, including completed jobs. For external jobs or other dependency
+types, supply a raw expression in `JobOptions.dependency` by itself. The
+manager asks Slurm to cancel a dependent job if its dependency can never
+be satisfied.
+
+`time_limit` limits job runtime in minutes. `job.wait(timeout=...)` limits
 how long the client waits, in seconds; it raises on failure or timeout. A timeout
 does not cancel the job automatically, so the example explicitly calls
 `job.cancel()`. `manager.shutdown()` disconnects without cancelling jobs.

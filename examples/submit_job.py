@@ -51,7 +51,7 @@ def main(
             job_options=RAJobOptions(
                 name="slurm-manager-redis-stdout-smoke",
                 tasks=1,
-                time_limit_minutes=1,
+                time_limit=1,
                 standard_output=f"{log_directory}/redis-stdout-%j.out",
                 standard_error=f"{log_directory}/redis-stdout-%j.err",
             ),
