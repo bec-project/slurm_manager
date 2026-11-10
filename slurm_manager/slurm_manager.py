@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import shlex
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Generic, Literal, overload
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from typing_extensions import TypeVar
 
@@ -117,6 +118,8 @@ class SlurmManager(Generic[_JobOptionsT]):
             redis_options = {"ssl": True, "ssl_cert_reqs": "required", "ssl_check_hostname": True}
         self.sub_client = RedisSubClient(bootstrap=self._redis_address, **redis_options)
         self._job_tracker = JobTracker(self.sub_client)
+        self._submitted_futures: WeakValueDictionary[str, JobFuture] = WeakValueDictionary()
+        self._submitted_futures_lock = threading.Lock()
         self._stop_heartbeat_thread = threading.Event()
         # Heartbeat monitoring thread
         self._heartbeat_monitoring_thread = threading.Thread(
@@ -196,13 +199,15 @@ class SlurmManager(Generic[_JobOptionsT]):
     #  Public Job Management                       #
     ################################################
 
-    def submit_job(
+    def submit_job(  # noqa: PLR0913 - submission options
         self,
         script_path: str | Path,
         env_path: str | Path | None = None,
         *,
         working_directory: str,
         job_options: _JobOptionsT | None = None,
+        after_ok: JobFuture | Sequence[JobFuture] | None = None,
+        after_any: JobFuture | Sequence[JobFuture] | None = None,
         callbacks: dict[Literal["log", "status", "heartbeat"], Callable[[SlurmMessage], None]]
         | None = None,
     ) -> JobFuture:
@@ -217,6 +222,11 @@ class SlurmManager(Generic[_JobOptionsT]):
                 the job runs.
             job_options (JobOptions | None): Validated resources and Slurm output
                 settings; None uses JobOptions defaults.
+            after_ok: One or more jobs from this manager that must succeed before the
+                new job starts.
+            after_any: One or more jobs from this manager that must finish before the
+                new job starts, regardless of outcome. Both after_ok and after_any
+                may be supplied. Use job_options.dependency for a raw expression.
             callbacks (dict[str, Callable] | None): Callbacks keyed by log, status, or
                 heartbeat, acknowledged before job release.
 
@@ -226,8 +236,8 @@ class SlurmManager(Generic[_JobOptionsT]):
 
         Raises:
             FileNotFoundError: A local workload or activation file does not exist.
-            ValueError: The remote working directory or callback event names are
-                invalid.
+            ValueError: The working directory, callback event names, or dependencies
+                are invalid.
             ValidationError: Resource or output options fail JobOptions validation.
             SlurmRestError: Submission or release fails. A known held job is cancelled
                 on setup failure.
@@ -242,8 +252,18 @@ class SlurmManager(Generic[_JobOptionsT]):
             raise ValueError("Working directory must be an absolute compute-node path")
         if callbacks and set(callbacks).difference({"log", "status", "heartbeat"}):
             raise ValueError("Callbacks must use log, status, or heartbeat keys")
-        options = job_options.model_dump() if isinstance(job_options, JobOptions) else job_options
+        options = job_options
+        if isinstance(job_options, JobOptions):
+            exclude = {"tasks"} if job_options.tasks_per_node is not None else set()
+            options = job_options.model_dump(exclude=exclude - job_options.model_fields_set)
         job = self._job_options_type.model_validate({} if options is None else options).to_rest()
+        dependency = self._build_job_dependency(
+            after_ok=after_ok, after_any=after_any, has_raw_dependency="dependency" in job
+        )
+        if dependency is not None:
+            job["dependency"] = dependency
+        if "dependency" in job:
+            job["flags"] = [*job.get("flags", ()), "KILL_INVALID_DEPENDENCY"]
         job_id = str(uuid4())
         script = self._build_job_script(
             script_path,
@@ -283,6 +303,8 @@ class SlurmManager(Generic[_JobOptionsT]):
                 StatusMessage(status=f"error:Submission setup failed: {exc}"), job_future
             )
             raise
+        with self._submitted_futures_lock:
+            self._submitted_futures[job_id] = job_future
         return job_future
 
     def cancel_job(self, slurm_job_id: str, job_id: str) -> None:
@@ -447,6 +469,39 @@ class SlurmManager(Generic[_JobOptionsT]):
     ################################################
     #  Internal Script Packaging                   #
     ################################################
+
+    def _build_job_dependency(
+        self,
+        *,
+        after_ok: JobFuture | Sequence[JobFuture] | None,
+        after_any: JobFuture | Sequence[JobFuture] | None,
+        has_raw_dependency: bool,
+    ) -> str | None:
+        """Validate issued futures and return their Slurm dependency expression."""
+        dependencies = []
+        for argument, kind, dependency_jobs in (
+            ("after_ok", "afterok", after_ok),
+            ("after_any", "afterany", after_any),
+        ):
+            if dependency_jobs is None:
+                continue
+            if has_raw_dependency:
+                raise ValueError(f"Specify either {argument} or job_options.dependency")
+            upstream = (
+                (dependency_jobs,)
+                if isinstance(dependency_jobs, JobFuture)
+                else tuple(dependency_jobs)
+            )
+            with self._submitted_futures_lock:
+                if not upstream or any(
+                    not isinstance(future, JobFuture)
+                    or self._submitted_futures.get(future._job_id) is not future
+                    for future in upstream
+                ):
+                    raise ValueError(f"{argument} must contain futures returned by this manager")
+            ids = ":".join(future.slurm_job_id for future in upstream)
+            dependencies.append(f"{kind}:{ids}")
+        return ",".join(dependencies) if dependencies else None
 
     @staticmethod
     def _build_job_script(  # noqa: PLR0913 - worker command and TLS configuration

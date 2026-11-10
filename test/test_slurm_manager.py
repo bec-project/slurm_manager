@@ -399,16 +399,123 @@ def test_local_files_are_uploaded_without_mutating_options(manager, tmp_path):
     activation = tmp_path / "it's my activation.sh"
     workload.write_text("#!/bin/bash\nprintf 'hello'\n")
     activation.write_text("module load redis\n")
-    options = JobOptions(partition="hour", tasks=2, time_limit_minutes=5)
+    options = JobOptions(partition="hour", tasks=2, time_limit=5)
     manager.submit_job(workload, activation, working_directory="/remote/work", job_options=options)
     script, job = manager.rest_client.submit.call_args.args
     assert "hello" in script
     assert "module load redis" in script
     assert str(tmp_path) not in script
     assert job["hold"] is True
-    assert options == JobOptions(partition="hour", tasks=2, time_limit_minutes=5)
+    assert "flags" not in job
+    assert options == JobOptions(partition="hour", tasks=2, time_limit=5)
     assert job["tasks"] == 2
     assert job["time_limit"] == {"set": True, "number": 5}
+
+
+@pytest.mark.parametrize("tasks", [None, 1, 8])
+def test_submission_preserves_explicit_tasks_for_per_node_layout(manager, tasks):
+    options = (
+        JobOptions(nodes="2", tasks_per_node=4)
+        if tasks is None
+        else JobOptions(nodes="2", tasks_per_node=4, tasks=tasks)
+    )
+
+    manager.submit_job(
+        "examples/print_for_10s.sh", working_directory="/remote/work", job_options=options
+    )
+
+    _, job = manager.rest_client.submit.call_args.args
+    assert job["nodes"] == "2"
+    assert job["tasks_per_node"] == 4
+    if tasks is None:
+        assert "tasks" not in job
+    else:
+        assert job["tasks"] == tasks
+
+
+@pytest.mark.parametrize(("argument", "kind"), [("after_ok", "afterok"), ("after_any", "afterany")])
+@pytest.mark.parametrize("multiple", [False, True], ids=["single", "multiple"])
+def test_dependency_futures_use_scheduler_job_ids(manager, argument, kind, multiple):
+    manager.rest_client.submit.side_effect = [{"job_id": number} for number in (123, 456, 789)]
+    first = submit(manager)
+    upstream = [first, submit(manager)] if multiple else first
+    manager.submit_job(
+        "examples/print_for_10s.sh", working_directory="/remote/work", **{argument: upstream}
+    )
+    _, job = manager.rest_client.submit.call_args.args
+    assert job["dependency"] == (f"{kind}:123:456" if multiple else f"{kind}:123")
+    assert job["flags"] == ["KILL_INVALID_DEPENDENCY"]
+
+
+def test_raw_dependency_requests_cancellation_if_it_can_never_be_satisfied(manager):
+    manager.submit_job(
+        "examples/print_for_10s.sh",
+        working_directory="/remote/work",
+        job_options=JobOptions(dependency="afterok:123,afterany:456"),
+    )
+    _, job = manager.rest_client.submit.call_args.args
+    assert job["dependency"] == "afterok:123,afterany:456"
+    assert job["flags"] == ["KILL_INVALID_DEPENDENCY"]
+
+
+@pytest.mark.parametrize("argument", ["after_ok", "after_any"])
+def test_dependency_futures_reject_a_raw_dependency(manager, argument):
+    upstream = submit(manager)
+    manager.rest_client.submit.reset_mock()
+    with pytest.raises(ValueError, match=f"either {argument} or job_options.dependency"):
+        manager.submit_job(
+            "examples/print_for_10s.sh",
+            working_directory="/remote/work",
+            job_options=JobOptions(dependency="afterany:123"),
+            **{argument: upstream},
+        )
+    manager.rest_client.submit.assert_not_called()
+
+
+@pytest.mark.parametrize("argument", ["after_ok", "after_any"])
+def test_dependencies_require_futures_from_this_manager(manager, argument):
+    issued = submit(manager)
+    foreign_job = JobFuture("foreign", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
+    copied_job = JobFuture(issued._job_id, manager=manager, slurm_job_id=issued.slurm_job_id)
+    manager.rest_client.submit.reset_mock()
+    for upstream in (foreign_job, [issued, copied_job], []):
+        with pytest.raises(ValueError, match="futures returned by this manager"):
+            manager.submit_job(
+                "examples/print_for_10s.sh",
+                working_directory="/remote/work",
+                **{argument: upstream},
+            )
+    manager.rest_client.submit.assert_not_called()
+
+
+def test_dependencies_accept_completed_futures_from_this_manager(manager):
+    upstream = submit(manager)
+    manager._job_tracker.apply_status(StatusMessage(status="finished"), upstream)
+    assert upstream.done()
+    assert manager._job_tracker.get_future(upstream._job_id) is None
+
+    manager.submit_job(
+        "examples/print_for_10s.sh", working_directory="/remote/work", after_ok=upstream
+    )
+    _, job = manager.rest_client.submit.call_args.args
+    assert job["dependency"] == "afterok:123"
+
+
+def test_combines_after_ok_and_after_any(manager):
+    manager.rest_client.submit.side_effect = [
+        {"job_id": number} for number in (123, 456, 789, 1011)
+    ]
+    prepare, calibrate, monitor = (submit(manager) for _ in range(3))
+
+    manager.submit_job(
+        "examples/print_for_10s.sh",
+        working_directory="/remote/work",
+        after_ok=[prepare, calibrate],
+        after_any=monitor,
+    )
+
+    _, job = manager.rest_client.submit.call_args.args
+    assert job["dependency"] == "afterok:123:456,afterany:789"
 
 
 def test_submission_failure_does_not_register_job(manager):

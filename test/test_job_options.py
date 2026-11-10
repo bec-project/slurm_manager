@@ -14,10 +14,34 @@ from slurm_manager.clusters.ra import RAJobOptions
         ("tasks", -1),
         ("tasks", True),
         ("tasks", 1.5),
-        ("time_limit_minutes", 0),
-        ("time_limit_minutes", -1),
-        ("time_limit_minutes", "60"),
+        ("time_limit", 0),
+        ("time_limit", -1),
+        ("time_limit", "60"),
         ("partition", "   "),
+        ("reservation", "   "),
+        ("constraints", "   "),
+        ("dependency", "   "),
+        ("nodes", "   "),
+        ("nodes", 2),
+        ("tasks_per_node", 0),
+        ("tasks_per_node", True),
+        ("tasks_per_node", 65534),
+        ("tasks_per_core", 0),
+        ("tasks_per_core", True),
+        ("tasks_per_core", 65536),
+        ("tres_per_node", "   "),
+        ("tres_per_task", "   "),
+        ("cpus_per_task", 0),
+        ("cpus_per_task", True),
+        ("cpus_per_task", 65534),
+        ("memory_per_cpu", 0),
+        ("memory_per_node", -1),
+        ("memory_per_node", "4096"),
+        ("exclusive", 1),
+        ("shared", "none"),
+        ("shared", []),
+        ("shared", ["none", "oversubscribe"]),
+        ("shared", ["exclusive"]),
         ("hold", False),
         ("time_limit", {"set": True, "number": 1}),
     ],
@@ -31,14 +55,83 @@ def test_unset_options_preserve_slurm_defaults():
     assert JobOptions().to_rest() == {"tasks": 1}
 
 
+def test_per_node_layout_omits_an_implicit_total_task_count():
+    assert JobOptions(nodes="2", tasks_per_node=4).to_rest() == {"nodes": "2", "tasks_per_node": 4}
+
+
+@pytest.mark.parametrize("tasks_per_core", [1, 2, 65535])
+def test_tasks_per_core_is_sent_as_a_rest_integer(tasks_per_core):
+    assert RAJobOptions(tasks_per_core=tasks_per_core).to_rest() == {
+        "tasks": 1,
+        "tasks_per_core": tasks_per_core,
+    }
+
+
 def test_runtime_uses_minutes_and_slurm_optional_number_shape():
-    options = JobOptions(partition="hour", tasks=2, time_limit_minutes=60)
+    options = JobOptions(partition="hour", tasks=2, time_limit=60)
     assert options.to_rest() == {
         "partition": "hour",
         "tasks": 2,
         "time_limit": {"set": True, "number": 60},
     }
-    assert options.time_limit_minutes == 60
+    assert options.time_limit == 60
+
+
+def test_cluster_job_options_serialize_reservation_cpus_memory_and_exclusive():
+    options = RAJobOptions(
+        reservation=" beamtime ", cpus_per_task=4, memory_per_cpu=2048, shared=["none"]
+    )
+    assert options.to_rest() == {
+        "tasks": 1,
+        "reservation": "beamtime",
+        "cpus_per_task": 4,
+        "memory_per_cpu": {"set": True, "number": 2048},
+        "shared": ["none"],
+    }
+
+
+def test_exclusive_uses_slurm_sharing_mode():
+    assert RAJobOptions(exclusive=True).to_rest() == {"tasks": 1, "shared": ["none"]}
+    assert RAJobOptions(exclusive=False).to_rest() == {"tasks": 1}
+
+
+def test_exclusive_cannot_be_combined_with_explicit_sharing():
+    with pytest.raises(ValidationError, match="either exclusive=True or shared"):
+        JobOptions(exclusive=True, shared=["oversubscribe"])
+
+
+def test_job_options_forward_node_layout_resources_and_dependencies():
+    options = RAJobOptions(
+        nodes="2-4",
+        tasks=4,
+        tasks_per_node=2,
+        constraints="a100",
+        dependency="afterok:12345",
+        tres_per_node="gres/gpu=2",
+        tres_per_task="gres/gpu=1",
+    )
+    assert options.to_rest() == {
+        "nodes": "2-4",
+        "tasks": 4,
+        "tasks_per_node": 2,
+        "constraints": "a100",
+        "dependency": "afterok:12345",
+        "tres_per_node": "gres/gpu=2",
+        "tres_per_task": "gres/gpu=1",
+    }
+
+
+@pytest.mark.parametrize("memory_mib", [0, 4096])
+def test_memory_per_node_serializes_zero_and_explicit_amounts(memory_mib):
+    assert JobOptions(memory_per_node=memory_mib).to_rest() == {
+        "tasks": 1,
+        "memory_per_node": {"set": True, "number": memory_mib},
+    }
+
+
+def test_memory_options_are_mutually_exclusive():
+    with pytest.raises(ValidationError, match="either memory_per_cpu or memory_per_node"):
+        JobOptions(memory_per_cpu=1024, memory_per_node=0)
 
 
 @pytest.mark.parametrize("partition", ["hour", "day", "week", "gpu"])
