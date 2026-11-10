@@ -1,6 +1,6 @@
 """Validated user-facing Slurm job options."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -21,21 +21,14 @@ class JobOptions(BaseModel):
     name: NonEmptyString | None = Field(
         default=None, description="Job name shown in Slurm. Omit to use the scheduler default."
     )
-    partition: Literal["hour", "day", "week", "gpu"] | None = Field(
-        default=None,
-        description=(
-            "RA partition: hour (default/max 1 hour), day (default 4 hours, max 24 hours), "
-            "week (default 2 days, max 8 days), or gpu (default 1 hour, max 7 days). "
-            "Omit to use the cluster default, currently hour."
-        ),
+    partition: NonEmptyString | None = Field(
+        default=None, description="Slurm partition name. Omit to use the scheduler default."
     )
     account: NonEmptyString | None = Field(
         default=None,
         description=(
             "Slurm accounting/project account; omit to use your default account association. "
-            "The account must also be allowed by the selected partition: hour/day allow "
-            "user and proprietary; gpu allows user and gpu-csaxs; week denies gpu-csaxs "
-            "and tomcat. These partition rules do not establish your account membership."
+            "The account must also be allowed by the selected partition."
         ),
     )
     qos: NonEmptyString | None = Field(
@@ -43,9 +36,7 @@ class JobOptions(BaseModel):
         description=(
             "Quality of Service controlling scheduling priority and resource limits. "
             "Must be allowed by both your association and the selected partition. "
-            "Omit to use your association's default job QoS. The gpu partition allows "
-            "gpu-default, gpu-day, gpu-hour, and gpu-csaxs, and additionally applies "
-            "partition QoS gpu-default. Partition QoS is separate from requested job QoS."
+            "Omit to use your association's default job QoS."
         ),
     )
     tasks: int = Field(
@@ -64,9 +55,7 @@ class JobOptions(BaseModel):
         strict=True,
         description=(
             "Maximum job wall-clock runtime in minutes. Slurm terminates the job at this limit. "
-            "Omit to use the selected partition's default: hour 60, day 240, week 2880, "
-            "gpu 60 minutes. Partition maxima are respectively 60, 1440, 11520, and "
-            "10080 minutes; account/QoS limits may impose additional restrictions. "
+            "Omit to use the selected partition's default. "
             "Separate from JobFuture.wait(timeout), which is measured in seconds."
         ),
     )

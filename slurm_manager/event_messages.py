@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, TypeAdapter
 class SlurmBaseMessage(BaseModel):
     """Base class for all messages sent by the job wrapper. It defines the common structure of the messages."""
 
-    msg_type: str = Field(description="Discriminator used to parse incoming job messages.")
     metadata: dict[str, str] = Field(
         default_factory=dict,
         description="Metadata dictionary that contains additional information about the message, e.g. msg_received, slurm_job_id, job_id.",

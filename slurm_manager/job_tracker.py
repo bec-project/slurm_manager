@@ -584,21 +584,16 @@ class JobTracker:
         )
         topic = topic_info.heartbeat
 
-        def wrapped_callback(message: HeartBeatMessage, sub_info: SubscriptionInfo) -> None:
-            """Enrich a parsed worker message and dispatch its registered handler.
-
-            Args:
-                message (HeartBeatMessage): Raw Redis payload or parsed worker message,
-                    as specified by the annotation.
-                sub_info (SubscriptionInfo): Subscription ownership and heartbeat
-                    bookkeeping.
-            """
+        def wrapped_callback(message: SlurmMessage) -> None:
+            if not isinstance(message, HeartBeatMessage):
+                logger.warning("Unexpected message type %s on topic %s", message.msg_type, topic)
+                return
             try:
                 message.metadata.update(
                     {
                         "msg_received": datetime.now().isoformat(),
                         "job_id": sub_info.job_id,
-                        "slurm_job_id": sub_info.slurm_job_id,
+                        "slurm_job_id": future.slurm_job_id,
                     }
                 )
                 self._heartbeat_callback(message, sub_info)
@@ -607,7 +602,7 @@ class JobTracker:
                     "Error in callback for topic %s: %s", message.msg_type, message.timestamp
                 )
 
-        cb_id = self._sub_client.subscribe(topic, partial(wrapped_callback, sub_info=sub_info))
+        cb_id = self._sub_client.subscribe(topic, wrapped_callback)
         sub_info.callback_id = cb_id
         sub_info.last_heartbeat = time.time()
         self._register_subscription_for_job(sub_info=sub_info)
@@ -631,15 +626,12 @@ class JobTracker:
         )
         event_topic = topic_info.event
 
-        def wrapped_callback(message: StatusMessage, future: JobFuture) -> None:
-            """Enrich a parsed worker message and dispatch its registered handler.
-
-            Args:
-                message (StatusMessage): Raw Redis payload or parsed worker message, as
-                    specified by the annotation.
-                future (JobFuture): Tracked future whose lifecycle or subscriptions are
-                    being managed.
-            """
+        def wrapped_callback(message: SlurmMessage) -> None:
+            if not isinstance(message, StatusMessage):
+                logger.warning(
+                    "Unexpected message type %s on topic %s", message.msg_type, event_topic
+                )
+                return
             try:
                 message.metadata.update(
                     {
@@ -652,7 +644,7 @@ class JobTracker:
             except Exception:
                 logger.error("Error in callback for topic %s: %s", message.msg_type, message.status)
 
-        cb_id = self._sub_client.subscribe(event_topic, partial(wrapped_callback, future=future))
+        cb_id = self._sub_client.subscribe(event_topic, wrapped_callback)
         sub_info.callback_id = cb_id
         self._register_subscription_for_job(sub_info=sub_info)
 

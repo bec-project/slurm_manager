@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,7 +43,7 @@ def endpoint(tmp_path, monkeypatch):
                 payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             )
 
-        def log_message(self, *_args):
+        def log_message(self, format, *args):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -81,8 +82,10 @@ def test_submit_release_cancel_and_accounting_wire_format(endpoint):
     }
     assert client.submit("#!/bin/bash\necho hello", job)["job_id"] == 123
     client.release("123")
-    assert client.get_job("123")["job_state"] == ["RUNNING"]
-    assert client.get_job("123", accounting=True)["state"]["current"] == ["COMPLETED"]
+    running = client.get_job("123")
+    completed = client.get_job("123", accounting=True)
+    assert running is not None and running["job_state"] == ["RUNNING"]
+    assert completed is not None and completed["state"]["current"] == ["COMPLETED"]
     client.cancel("123")
     assert [(method, path) for method, path, _, _ in calls] == [
         ("POST", "/slurm/v0.0.44/job/submit"),
@@ -109,6 +112,23 @@ def test_token_rotation_and_environment_override(endpoint, monkeypatch):
     assert calls[0][2]["X-Slurm-User-Token"] == "replacement-token"
     assert calls[1][2]["X-Slurm-User-Token"] == "environment-token"
     assert calls[1][2]["X-Slurm-User-Name"] == "alice"
+
+
+def test_removed_environment_override_falls_back_to_credential_file(tmp_path, monkeypatch):
+    class StaleEnvironment(dict[str, str]):
+        def __contains__(self, key: object) -> bool:
+            # Simulate SLURM_JWT disappearing just after a membership check.
+            return key == "SLURM_JWT" or super().__contains__(key)
+
+    monkeypatch.delenv("SLURM_JWT", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("SLURM_JWT=file-token\n")
+    client = SlurmRestClient(env_file, rest_url="https://slurm.example")
+    monkeypatch.setattr(
+        "slurm_manager.slurm_rest_client.os", SimpleNamespace(environ=StaleEnvironment())
+    )
+
+    assert client._settings()["SLURM_JWT"] == "file-token"
 
 
 @pytest.mark.parametrize(
@@ -189,11 +209,12 @@ def test_manager_submission_and_completion_over_http(endpoint):
     finally:
         manager.shutdown(timeout=3)
     assert not manager._heartbeat_monitoring_thread.is_alive()
-    assert not redis._listener_thread.is_alive()
+    assert redis._listener_thread is not None and not redis._listener_thread.is_alive()
 
 
 @pytest.mark.parametrize("error_response", [False, True])
 def test_truncated_responses_raise_a_transport_error(endpoint, error_response):
+    from email.message import Message
     from http.client import IncompleteRead
     from unittest import mock
     from urllib.error import HTTPError
@@ -203,7 +224,7 @@ def test_truncated_responses_raise_a_transport_error(endpoint, error_response):
     response = mock.MagicMock()
     response.read.side_effect = IncompleteRead(b"partial", 100)
     if error_response:
-        error = HTTPError("http://local/job", 500, "Server error", {}, response)
+        error = HTTPError("http://local/job", 500, "Server error", Message(), response)
         patch = mock.patch.object(client._opener, "open", side_effect=error)
     else:
         opened = mock.MagicMock()

@@ -13,8 +13,9 @@ pip install bec-slurm-manager
 cp .env.example .env
 ```
 
-Set `SLURM_JWT` in your local `.env` file. The example contains the RA REST URL
-and API version. This credential file is ignored by Git and never uploaded.
+Set `SLURM_JWT` and, if needed, `SLURM_USER` in your local `.env` file.
+`SlurmManager.for_cluster()` uses the named cluster’s REST and Redis settings.
+Pass a cluster name or a `Cluster` enum member from `slurm_manager.clusters`. The credential file is ignored by Git and stays local.
 The submitter needs access to slurmrestd and Redis.
 For development from a checkout, install with `pip install -e '.[dev]'`.
 
@@ -22,9 +23,9 @@ For development from a checkout, install with `pip install -e '.[dev]'`.
 
 Redis connections use TLS by default, including the worker on compute nodes.
 Certificates and hostnames are verified against each machine's system trust store.
-Set `redis_port` to the server's TLS listener port if it differs from 6379.
-Clients do not need their own certificate or a certificate path.
-For a local plaintext Redis server, explicitly pass `redis_tls=False`.
+For built-in clusters, `ClusterInfo` defines the Redis host, port, and TLS setting.
+When constructing a manager directly, pass `redis_port` for a non-default
+listener port or `redis_tls=False` for a local plaintext Redis server.
 The standalone worker likewise defaults to TLS; use `--redis-tls=false` for plaintext.
 
 ## Simple job
@@ -32,9 +33,10 @@ The standalone worker likewise defaults to TLS; use `--redis-tls=false` for plai
 Run the included ten-second Bash script using the cluster's default resources:
 
 ```python
+from slurm_manager.clusters import Cluster
 from slurm_manager.slurm_manager import SlurmManager
 
-manager = SlurmManager(redis_host="bec-slurm.psi.ch")
+manager = SlurmManager.for_cluster(Cluster.RA, env_file=".env")
 try:
     job = manager.submit_job(
         script_path="examples/print_for_10s.sh", working_directory="/das/home/your_username"
@@ -54,15 +56,16 @@ Replace `working_directory` with an existing directory accessible on the compute
 Choose resources and log files, and receive live output and status updates:
 
 ```python
-from slurm_manager.job_options import JobOptions
+from slurm_manager.clusters import Cluster
+from slurm_manager.clusters.ra import RAJobOptions
 from slurm_manager.slurm_manager import SlurmManager
 
-manager = SlurmManager(redis_host="bec-slurm.psi.ch")
+manager = SlurmManager.for_cluster(Cluster.RA, env_file=".env")
 try:
     job = manager.submit_job(
         script_path="examples/print_for_10s.sh",
         working_directory="/das/home/your_username",
-        job_options=JobOptions(
+        job_options=RAJobOptions(
             name="my-analysis",
             partition="day",
             tasks=1,
@@ -88,8 +91,9 @@ The log directory must already exist on the compute node; `%j` expands to the Sl
 job ID. Output is also forwarded through Redis. Workloads must flush their output
 buffers for live feedback.
 
-Supported partitions are `hour`, `day`, `week`, and `gpu`. Omit `job_options` to use
-one task and the cluster's default partition and time limit. `JobOptions` also
+`RAJobOptions` validates the partition against `hour`, `day`, `week`, and `gpu`.
+Omit `job_options` to use one task and the cluster's default partition and time
+limit. `RAJobOptions` also
 accepts `account` and `qos`. Requesting tasks reserves a Slurm allocation; the
 workload script runs once and must launch any parallel processes itself.
 

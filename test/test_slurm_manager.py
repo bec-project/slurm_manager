@@ -10,10 +10,15 @@ from unittest import mock
 
 import fakeredis
 import pytest
+from pydantic import ValidationError
 
+from slurm_manager.clusters import Cluster, ra
+from slurm_manager.clusters.job_options import JobOptions
+from slurm_manager.clusters.ra import RAJobOptions
+from slurm_manager.clusters.sfonline import SFOnlineJobOptions
+from slurm_manager.clusters.slsonline import SLSOnlineJobOptions
 from slurm_manager.event_messages import HeartBeatMessage, StatusMessage
 from slurm_manager.job_future import JobFuture
-from slurm_manager.job_options import JobOptions
 from slurm_manager.job_tracker import TopicInfo
 from slurm_manager.redis_sub_client import RedisSubClient
 from slurm_manager.slurm_manager import SlurmManager
@@ -56,7 +61,7 @@ def heartbeat_info(manager, future):
 
 
 def test_wait_propagates_failure_arriving_during_wait():
-    future = JobFuture("job", manager=None, slurm_job_id="123")
+    future = JobFuture("job", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     timer = threading.Timer(0.05, lambda: future._update_status("error", "exit code 7"))
     timer.start()
     try:
@@ -67,7 +72,7 @@ def test_wait_propagates_failure_arriving_during_wait():
 
 
 def test_wait_timeout_does_not_complete_future():
-    future = JobFuture("job", manager=None, slurm_job_id="123")
+    future = JobFuture("job", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     with pytest.raises(TimeoutError):
         future.wait(timeout=0)
     assert not future.done()
@@ -77,7 +82,7 @@ def test_wait_timeout_does_not_complete_future():
 
 
 def test_terminal_state_ignores_late_status_updates():
-    future = JobFuture("job", manager=None, slurm_job_id="123")
+    future = JobFuture("job", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     future._update_status("finished")
     future._update_status("running")
     assert future.status == "finished"
@@ -600,22 +605,30 @@ def test_shutdown_clears_manager_wide_registrations(manager):
 
 
 @pytest.mark.parametrize("tls", [True, False])
-def test_redis_transport_reaches_subscriber_and_worker(tmp_path, tls):
+def test_cluster_redis_transport_reaches_subscriber_and_worker(tmp_path, monkeypatch, tls):
+    info = ra.CLUSTER_INFO.model_copy(
+        update={"redis_host": "redis.example", "redis_port": 6380, "redis_tls": tls}
+    )
+    monkeypatch.setattr(ra, "CLUSTER_INFO", info)
     workload = tmp_path / "job.sh"
     workload.write_text("true\n")
     client = RedisSubClient(redis_cls=fakeredis.FakeRedis)
     rest = mock.Mock(spec=SlurmRestClient)
     rest.submit.return_value = {"job_id": 123}
-    with mock.patch("slurm_manager.slurm_manager.RedisSubClient", return_value=client) as ctor:
-        manager = SlurmManager(redis_host="redis.example", rest_client=rest, redis_tls=tls)
+    with (
+        mock.patch("slurm_manager.slurm_manager.RedisSubClient", return_value=client) as ctor,
+        mock.patch("slurm_manager.slurm_manager.SlurmRestClient", return_value=rest),
+    ):
+        manager = SlurmManager.for_cluster("ra", env_file=tmp_path / "ra.env")
     try:
-        expected = {"bootstrap": "redis.example:6379"}
+        expected: dict[str, str | bool] = {"bootstrap": "redis.example:6380"}
         if tls:
             expected.update(ssl=True, ssl_cert_reqs="required", ssl_check_hostname=True)
         ctor.assert_called_once_with(**expected)
         with mock.patch.object(manager._job_tracker, "wait_until_ready"):
             manager.submit_job(workload, working_directory="/remote/work")
         script = rest.submit.call_args.args[0]
+        assert "--redis-address redis.example:6380" in script
         assert f"--redis-tls={str(tls).lower()}" in script
     finally:
         manager.shutdown(timeout=3)
@@ -633,3 +646,81 @@ def test_tls_uses_system_trust_by_default():
             )
         finally:
             manager.shutdown(timeout=3)
+
+
+@pytest.mark.parametrize("use_enum", [False, True], ids=["name", "enum"])
+@pytest.mark.parametrize(
+    ("cluster", "url", "invalid_options"),
+    [
+        ("ra", "https://ra-slurmapi-001.psi.ch", RAJobOptions.model_construct(partition="prod")),
+        (
+            "sfonline",
+            "https://sf-slurmrest.psi.ch",
+            SFOnlineJobOptions.model_construct(partition="hour"),
+        ),
+        (
+            "slsonline",
+            "https://sls-slurm-001.psi.ch",
+            SLSOnlineJobOptions.model_construct(partition="gpu"),
+        ),
+    ],
+)
+def test_factory_binds_endpoint_credentials_and_partition_validation(
+    tmp_path, monkeypatch, cluster, url, invalid_options, use_enum
+):
+    credentials = tmp_path / f"{cluster}.env"
+    credentials.write_text("SLURM_JWT=ra-token\n")
+    monkeypatch.setenv("SLURM_JWT", "other-token")
+    monkeypatch.setenv("SLURM_REST_URL", "https://other.example")
+    monkeypatch.setenv("SLURM_REST_API_VERSION", "v0.0.99")
+
+    redis = RedisSubClient(redis_cls=fakeredis.FakeRedis)
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient", return_value=redis) as ctor:
+        manager = SlurmManager.for_cluster(
+            Cluster(cluster) if use_enum else cluster, env_file=credentials
+        )
+    try:
+        ctor.assert_called_once_with(
+            bootstrap="bec-slurm.psi.ch:6379",
+            ssl=True,
+            ssl_cert_reqs="required",
+            ssl_check_hostname=True,
+        )
+        client = manager.rest_client
+        assert client.url == url
+        assert client.api_version == "v0.0.44"
+        assert client._headers(client._settings())["X-SLURM-USER-TOKEN"] == "ra-token"
+        with mock.patch.object(client, "submit") as submit_rest:
+            with pytest.raises(ValidationError, match="partition"):
+                manager.submit_job(
+                    "examples/print_for_10s.sh",
+                    working_directory="/remote/work",
+                    job_options=invalid_options,
+                )
+            submit_rest.assert_not_called()
+    finally:
+        manager.shutdown(timeout=3)
+
+
+@pytest.mark.parametrize(
+    ("options_type", "partition"),
+    [
+        (SFOnlineJobOptions, "prod"),
+        (SFOnlineJobOptions, "prod-aramis"),
+        (SFOnlineJobOptions, "prod-athos"),
+        (SFOnlineJobOptions, "prod-gpu"),
+        (SLSOnlineJobOptions, "hour"),
+        (SLSOnlineJobOptions, "day"),
+        (SLSOnlineJobOptions, "week"),
+    ],
+)
+def test_online_job_options_accept_allowed_partitions(options_type, partition):
+    assert options_type(partition=partition).to_rest()["partition"] == partition
+
+
+@pytest.mark.parametrize(
+    ("options_type", "default_partition"),
+    [(SFOnlineJobOptions, "prod"), (SLSOnlineJobOptions, "hour")],
+)
+def test_online_job_options_send_cluster_default_partition(options_type, default_partition):
+    assert options_type().to_rest()["partition"] == default_partition

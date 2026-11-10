@@ -14,14 +14,16 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import pytest
 
-from slurm_manager.event_messages import SlurmMessage
+from slurm_manager.clusters.job_options import JobOptions
+from slurm_manager.event_messages import HeartBeatMessage, LogMessage, SlurmMessage, StatusMessage
 from slurm_manager.job_future import JobFuture
-from slurm_manager.job_options import JobOptions
 from slurm_manager.slurm_manager import SlurmManager
+
+_MessageT = TypeVar("_MessageT", bound=SlurmMessage)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("SLURM_RA_HOME"), reason="Explicit SLURM_RA_HOME required for live jobs"
@@ -63,7 +65,11 @@ def test_ra_modules(tmp_path: Path) -> None:
             script_path=workload,
             env_path=activation,
             working_directory=remote_home,
-            callbacks={"log": lambda message: lines.append(message.log)},
+            callbacks={
+                "log": lambda message: (
+                    lines.append(message.log) if isinstance(message, LogMessage) else None
+                )
+            },
             job_options=JobOptions(
                 name="smoke-modules",
                 partition="hour",
@@ -113,22 +119,22 @@ def test_ra_job_lifecycle(tmp_path: Path) -> None:
         with lock:
             events.append(message)
 
-    def received(job: JobFuture, kind: str) -> list[SlurmMessage]:
+    def received(job: JobFuture, message_type: type[_MessageT]) -> list[_MessageT]:
         """Return a snapshot of messages for the scheduler job.
 
         Args:
             job (JobFuture): Job whose feedback is selected.
-            kind (str): Message discriminator to select.
+            message_type: Message model to select.
 
         Returns:
-            list[SlurmMessage]: Matching feedback collected so far.
+            Matching feedback collected so far.
         """
         with lock:
             return [
                 message
                 for message in events
                 if message.metadata.get("slurm_job_id") == job.slurm_job_id
-                and message.msg_type == kind
+                and isinstance(message, message_type)
             ]
 
     def submit(
@@ -214,7 +220,11 @@ def test_ra_job_lifecycle(tmp_path: Path) -> None:
         detached = submit(
             "unlisten",
             "echo local-only\nsleep 2\n",
-            {"log": lambda message: local_lines.append(message.log)},
+            {
+                "log": lambda message: (
+                    local_lines.append(message.log) if isinstance(message, LogMessage) else None
+                )
+            },
         )
         detached.wait(timeout=90)
     finally:
@@ -225,15 +235,15 @@ def test_ra_job_lifecycle(tmp_path: Path) -> None:
         finally:
             manager.shutdown(timeout=65)
 
-    assert sorted(message.log for message in received(live, "log")) == sorted(
+    assert sorted(message.log for message in received(live, LogMessage)) == sorted(
         [f"stdout-{index}" for index in range(1, 11)] + ["stderr-ok"]
     )
-    assert received(live, "heartbeat")
-    assert any(message.status == "finished" for message in received(live, "status"))
-    assert [message.log for message in received(failed, "log")] == ["failure-visible"]
-    assert any(message.status.startswith("error") for message in received(failed, "status"))
-    assert received(cancelled, "heartbeat")
-    assert any(message.status == "cancelled" for message in received(cancelled, "status"))
-    assert not received(detached, "log")
-    assert not received(detached, "status")
+    assert received(live, HeartBeatMessage)
+    assert any(message.status == "finished" for message in received(live, StatusMessage))
+    assert [message.log for message in received(failed, LogMessage)] == ["failure-visible"]
+    assert any(message.status.startswith("error") for message in received(failed, StatusMessage))
+    assert received(cancelled, HeartBeatMessage)
+    assert any(message.status == "cancelled" for message in received(cancelled, StatusMessage))
+    assert not received(detached, LogMessage)
+    assert not received(detached, StatusMessage)
     assert local_lines == ["local-only"]
