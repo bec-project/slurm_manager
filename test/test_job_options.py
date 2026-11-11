@@ -23,6 +23,9 @@ from slurm_manager.clusters.ra import RAJobOptions
         ("dependency", "   "),
         ("nodes", "   "),
         ("nodes", 2),
+        ("required_nodes", "node01"),
+        ("required_nodes", []),
+        ("required_nodes", [" "]),
         ("tasks_per_node", 0),
         ("tasks_per_node", True),
         ("tasks_per_node", 65534),
@@ -53,6 +56,14 @@ def test_invalid_or_internal_options_are_rejected(field, value):
 
 def test_unset_options_preserve_slurm_defaults():
     assert JobOptions().to_rest() == {"tasks": 1}
+
+
+def test_required_nodes_use_the_rest_array_field():
+    assert RAJobOptions(nodes="3", required_nodes=["node[01-02,04]"]).to_rest() == {
+        "tasks": 1,
+        "nodes": "3",
+        "required_nodes": ["node[01-02,04]"],
+    }
 
 
 def test_per_node_layout_omits_an_implicit_total_task_count():
