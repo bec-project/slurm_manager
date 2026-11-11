@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bec-slurm-manager"
-version = "1.1.1"
+version = "1.2.0"
 description = "A tool for managing slurm jobs."
 requires-python = ">=3.11"
 classifiers = [

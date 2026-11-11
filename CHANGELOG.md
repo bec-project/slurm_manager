@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v1.2.0 (2026-11-11)
+
+### Features
+
+- Add Slurm niceness and required nodes
+  ([`217c90e`](https://github.com/bec-project/slurm_manager/commit/217c90eae63e36563275e7f0c04a40131e97680f))
+
+- Add Slurm resource and dependency options
+  ([`cf40bc2`](https://github.com/bec-project/slurm_manager/commit/cf40bc2cacfe298c2929292a3cbe3a937ed3c0f3))
+
+- Add typed Slurm cluster configuration
+  ([`be30527`](https://github.com/bec-project/slurm_manager/commit/be30527243d5ec68e1a3eb85c9d9c705bd7ddb12))
+
+- Support command and remote script workloads
+  ([`ce03769`](https://github.com/bec-project/slurm_manager/commit/ce037697e944c98676ab9a3f79368bfb7fb76ef6))
+
+### Testing
+
+- Exercise RA cluster factory in live test
+  ([`6622092`](https://github.com/bec-project/slurm_manager/commit/662209290b5d90d2125545e7a162cff82f39d785))
+
+- Extend live RA integration coverage
+  ([`0956c0d`](https://github.com/bec-project/slurm_manager/commit/0956c0de68b82a7a83bb241a4cbed5460ca57bee))
+
+
 ## v1.1.1 (2026-11-05)
 
 ### Bug Fixes
