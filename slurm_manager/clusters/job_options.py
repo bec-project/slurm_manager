@@ -91,6 +91,21 @@ class JobOptions(BaseModel):
         strict=True,
         description="Memory in MiB per node. Use 0 to request all memory on each node.",
     )
+    nice: int | None = Field(
+        default=None,
+        ge=1,
+        le=2147483645,
+        strict=True,
+        description=(
+            "Slurm job nice value, which adjusts scheduling priority. A higher nice value "
+            "means lower priority. Omit to use the scheduler default."
+        ),
+    )
+    required_nodes: list[NonEmptyString] | None = Field(
+        default=None,
+        min_length=1,
+        description='Required nodes or hostlist expressions, such as ["node[01-04]"].',
+    )
     tres_per_node: NonEmptyString | None = Field(
         default=None, description="Slurm trackable resource requests per node, such as GPUs."
     )
