@@ -10,11 +10,14 @@ are made. Each allocation is one task in hour with a one-minute wall-clock limit
 """
 
 import os
+import shlex
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from queue import Queue
 from typing import Literal, TypeVar
+from uuid import uuid4
 
 import pytest
 
@@ -247,3 +250,191 @@ def test_ra_job_lifecycle(tmp_path: Path) -> None:
     assert not received(detached, LogMessage)
     assert not received(detached, StatusMessage)
     assert local_lines == ["local-only"]
+
+
+@pytest.fixture
+def ra_home() -> Path:
+    """Return the shared home directory on RA."""
+    return Path(os.environ["SLURM_RA_HOME"])
+
+
+@pytest.fixture
+def ra_manager(ra_home: Path) -> Iterator[SlurmManager]:
+    """Connect to RA with the smoke test worker and Redis settings."""
+    manager = SlurmManager(
+        redis_host=os.environ.get("SLURM_RA_REDIS", "bec-slurm.psi.ch"),
+        worker_path=os.environ.get("SLURM_RA_WORKER", str(ra_home / "slurm-worker")),
+    )
+    try:
+        yield manager
+    finally:
+        manager.shutdown(timeout=65)
+
+
+def _wait_for_job(job: JobFuture) -> None:
+    """Wait for a short smoke job and cancel it if it is still running."""
+    print(f"Submitted RA job {job.slurm_job_id}", flush=True)
+    try:
+        job.wait(timeout=90)
+    finally:
+        if not job.done():
+            job.cancel()
+
+
+def test_ra_command(ra_manager: SlurmManager, ra_home: Path, tmp_path: Path) -> None:
+    """Run a shell command with the uploaded activation environment."""
+    activation = tmp_path / "activate.sh"
+    activation.write_text("export BEC_RA_SMOKE=activated\nset -- unused\n")
+    output: Queue[str] = Queue()
+
+    def capture_log(message: SlurmMessage) -> None:
+        if isinstance(message, LogMessage):
+            output.put(message.log)
+
+    job = ra_manager.submit_job(
+        command='test "$BEC_RA_SMOKE" = activated && printf "command-ok\\n"',
+        env_path=activation,
+        working_directory=str(ra_home),
+        callbacks={"log": capture_log},
+        job_options=JobOptions(name="smoke-command", partition="hour", time_limit=1),
+    )
+    _wait_for_job(job)
+    assert output.get(timeout=5) == "command-ok"
+
+
+def test_ra_remote_script(ra_manager: SlurmManager, ra_home: Path, tmp_path: Path) -> None:
+    """Resolve a relative script path before activation changes directory and arguments."""
+    remote_directory = ra_home / f".bec-slurm-smoke-{uuid4().hex}"
+    remote_script = remote_directory / "workload.sh"
+    directory = shlex.quote(str(remote_directory))
+    script = shlex.quote(str(remote_script))
+    workload = (
+        "set -eu\n"
+        'test "$BEC_RA_SMOKE" = activated\n'
+        'test "$PWD" = /\n'
+        f"rm -- {script}\n"
+        f"rmdir -- {directory}\n"
+    )
+    stage = tmp_path / "stage.sh"
+    stage.write_text(
+        f"#!/bin/bash\nset -eu\nmkdir -- {directory}\n"
+        f"printf '%s' {shlex.quote(workload)} > {script}\n"
+    )
+    cleanup = tmp_path / "cleanup.sh"
+    cleanup.write_text(
+        f"#!/bin/bash\nset -eu\nif [ -d {directory} ]; then\n"
+        f"    rm -f -- {script}\n    rmdir -- {directory}\nfi\n"
+    )
+    activation = tmp_path / "activate.sh"
+    activation.write_text("export BEC_RA_SMOKE=activated\nset -- unused\ncd /\n")
+    options = JobOptions(name="smoke-remote-script", partition="hour", time_limit=1)
+    staging_job = ra_manager.submit_job(
+        script_path=stage, working_directory=str(ra_home), job_options=options
+    )
+    try:
+        _wait_for_job(staging_job)
+        job = ra_manager.submit_job(
+            remote_script_path=str(remote_script.relative_to(ra_home)),
+            env_path=activation,
+            working_directory=str(ra_home),
+            job_options=options,
+        )
+        _wait_for_job(job)
+    except Exception:
+        cleanup_job = ra_manager.submit_job(
+            script_path=cleanup, working_directory=str(ra_home), job_options=options
+        )
+        _wait_for_job(cleanup_job)
+        raise
+
+
+@pytest.fixture
+def ra_noop(tmp_path: Path) -> Path:
+    """Provide an uploaded workload for checking scheduler options."""
+    script = tmp_path / "noop.sh"
+    script.write_text("#!/bin/bash\ntrue\n")
+    return script
+
+
+def test_ra_required_nodes(ra_manager: SlurmManager, ra_home: Path, ra_noop: Path) -> None:
+    """Request a node selected by Slurm and verify the next job's allocation."""
+    discovery = ra_manager.submit_job(
+        script_path=ra_noop,
+        working_directory=str(ra_home),
+        job_options=JobOptions(name="smoke-discover-node", partition="hour", time_limit=1),
+    )
+    _wait_for_job(discovery)
+    record = ra_manager.rest_client.get_job(discovery.slurm_job_id)
+    assert record is not None, "Slurm did not return the discovery job"
+    node = record.get("nodes")
+    assert isinstance(node, str) and node, (
+        f"Slurm returned no allocated node for {discovery.slurm_job_id}"
+    )
+
+    job = ra_manager.submit_job(
+        script_path=ra_noop,
+        working_directory=str(ra_home),
+        job_options=JobOptions(
+            name="smoke-required-node", partition="hour", time_limit=1, required_nodes=[node]
+        ),
+    )
+    _wait_for_job(job)
+    record = ra_manager.rest_client.get_job(job.slurm_job_id)
+    assert record is not None, "Slurm did not return the node-constrained job"
+    assert record.get("required_nodes") == node
+    assert record.get("nodes") == node
+
+
+def test_ra_nice(ra_manager: SlurmManager, ra_home: Path, ra_noop: Path) -> None:
+    """Verify that Slurm records the requested positive niceness."""
+    job = ra_manager.submit_job(
+        script_path=ra_noop,
+        working_directory=str(ra_home),
+        job_options=JobOptions(name="smoke-nice", partition="hour", time_limit=1, nice=100),
+    )
+    _wait_for_job(job)
+    record = ra_manager.rest_client.get_job(job.slurm_job_id)
+    assert record is not None, "Slurm did not return the nice job"
+    assert record.get("nice") == 100
+
+
+def test_ra_job_dependencies(ra_manager: SlurmManager, ra_home: Path, ra_noop: Path) -> None:
+    """Release after_any after a failure and cancel the unsatisfiable after_ok job."""
+    jobs: list[JobFuture] = []
+    options = JobOptions(name="smoke-dependencies", partition="hour", time_limit=1)
+    try:
+        upstream = ra_manager.submit_job(
+            command="sleep 8; exit 7", working_directory=str(ra_home), job_options=options
+        )
+        jobs.append(upstream)
+        after_ok = ra_manager.submit_job(
+            script_path=ra_noop,
+            working_directory=str(ra_home),
+            job_options=options,
+            after_ok=upstream,
+        )
+        jobs.append(after_ok)
+        after_any = ra_manager.submit_job(
+            script_path=ra_noop,
+            working_directory=str(ra_home),
+            job_options=options,
+            after_any=upstream,
+        )
+        jobs.append(after_any)
+
+        with pytest.raises(Exception, match="failed with status error"):
+            _wait_for_job(upstream)
+        _wait_for_job(after_any)
+        with pytest.raises(Exception, match="failed with status cancelled"):
+            _wait_for_job(after_ok)
+
+        parent_record = ra_manager.rest_client.get_job(upstream.slurm_job_id)
+        child_record = ra_manager.rest_client.get_job(after_any.slurm_job_id)
+        assert parent_record is not None and child_record is not None
+        parent_end = parent_record["end_time"]["number"]
+        child_start = child_record["start_time"]["number"]
+        assert 0 < parent_end <= child_start
+    finally:
+        for job in jobs:
+            if not job.done():
+                job.cancel()
