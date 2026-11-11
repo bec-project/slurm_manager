@@ -46,7 +46,13 @@ finally:
     manager.shutdown()
 ```
 
-`script_path` refers to a local Bash file whose contents are uploaded with the job.
+When calling `submit_job()`, pass exactly one of `command`, `script_path`,
+or `remote_script_path`. A local Bash file passed as
+`script_path` is uploaded with the job. Use `remote_script_path`
+for a Bash file accessible from the compute node. Relative paths start at
+`working_directory`. Use `command` for Bash command text, such as
+`command="python -m my_analysis"`. The worker executes command text directly
+in Bash.
 For optional module loads or environment activation, pass `env_path="activate.sh"`
 with a local Bash activation script. Additional files used by the workload are not uploaded.
 Replace `working_directory` with an existing directory accessible on the compute node.

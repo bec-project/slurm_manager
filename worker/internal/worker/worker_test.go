@@ -99,6 +99,28 @@ func TestScriptsOutputAndCleanup(t *testing.T) {
 		})
 	}
 }
+func TestCommandRunsWithoutStagingWorkload(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	var out, errout bytes.Buffer
+	cfg := config(&out, &errout)
+	cfg.RunCommand = true
+	publisher := &fakePublisher{}
+	payload := Payload{
+		Script: `test -z "$(find "$TMPDIR" -name workload.sh)" || exit 91
+printf '%s' "$TEST_VALUE"
+exit 7`,
+		Activation: "export TEST_VALUE='from activation'\nset -- unused\n",
+	}
+	code, err := Run(context.Background(), cfg, payload, publisher)
+	if code != 7 || err == nil || out.String() != "from activation" {
+		t.Fatalf("exit=%d err=%v stdout=%q stderr=%q", code, err, out.String(), errout.String())
+	}
+	if status := lastStatus(t, publisher); !strings.HasPrefix(status, "error:") {
+		t.Fatalf("status=%q", status)
+	}
+}
+
 func TestJobIDEnvironment(t *testing.T) {
 	// An inherited value must not override this job's identity.
 	t.Setenv("SLURM_WORKER_JOBID", "previous-job")

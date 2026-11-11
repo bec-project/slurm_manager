@@ -198,7 +198,9 @@ def test_manager_submission_and_completion_over_http(endpoint):
     with mock.patch("slurm_manager.slurm_manager.RedisSubClient", return_value=redis):
         manager = SlurmManager(env_file=env_file)
     try:
-        future = manager.submit_job("examples/print_for_10s.sh", working_directory="/remote/work")
+        future = manager.submit_job(
+            script_path="examples/print_for_10s.sh", working_directory="/remote/work"
+        )
         assert calls[0][3]["job"]["hold"] is True
         assert calls[1][3] == {"hold": False}
         topics = TopicInfo(future._job_id)

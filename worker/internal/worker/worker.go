@@ -23,7 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Payload carries the job identity and user scripts over stdin, never the submitter's credentials.
+// Payload carries the job identity, Bash workload, and activation text over stdin.
 type Payload struct {
 	JobID      string `json:"job_id"`
 	Script     string `json:"script"`
@@ -38,6 +38,7 @@ type Config struct {
 	GracePeriod       time.Duration
 	Stdout            io.Writer
 	Stderr            io.Writer
+	RunCommand        bool
 }
 
 // Publisher sends a parsed message to one job topic. Implementations must bound
@@ -75,6 +76,8 @@ func (p *RedisPublisher) Publish(ctx context.Context, topic string, message map[
 }
 
 const shellSetup = `
+readonly bec_slurm_activation_path="$1"
+readonly -a bec_slurm_workload_args=("${@:2}")
 if ! type module >/dev/null 2>&1; then
     for module_init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
         if [ -r "$module_init" ]; then
@@ -83,11 +86,13 @@ if ! type module >/dev/null 2>&1; then
         fi
     done
 fi
-source "$1" || exit $?
-exec /bin/bash "$2"
+if [ -n "$bec_slurm_activation_path" ]; then
+    source "$bec_slurm_activation_path" || exit $?
+fi
+exec /bin/bash "${bec_slurm_workload_args[@]}"
 `
 
-// Run stages payload scripts privately, sources activation, and executes one workload.
+// Run stages activation and any uploaded script privately, then executes one Bash workload.
 // Config supplies the job identity, timing, and archive writers; publisher receives
 // log, heartbeat, and terminal messages. Cancelling ctx terminates the process group.
 // The returned code is the workload exit status, 143 for cancellation, or 1 for a
@@ -102,18 +107,27 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 	if config.Stderr == nil {
 		config.Stderr = io.Discard
 	}
-	directory, err := os.MkdirTemp("", "bec-slurm-worker-")
-	if err != nil {
-		return 1, err
-	}
-	defer os.RemoveAll(directory)
-	activation := filepath.Join(directory, "activate.sh")
-	script := filepath.Join(directory, "workload.sh")
-	if err := os.WriteFile(activation, []byte(payload.Activation), 0600); err != nil {
-		return 1, err
-	}
-	if err := os.WriteFile(script, []byte(payload.Script), 0600); err != nil {
-		return 1, err
+	activation, script := "", ""
+
+	// Stage activation and script files in a temporary directory.
+	if payload.Activation != "" || !config.RunCommand {
+		directory, err := os.MkdirTemp("", "bec-slurm-worker-")
+		if err != nil {
+			return 1, err
+		}
+		defer os.RemoveAll(directory)
+		if payload.Activation != "" {
+			activation = filepath.Join(directory, "activate.sh")
+			if err := os.WriteFile(activation, []byte(payload.Activation), 0600); err != nil {
+				return 1, err
+			}
+		}
+		if !config.RunCommand {
+			script = filepath.Join(directory, "workload.sh")
+			if err := os.WriteFile(script, []byte(payload.Script), 0600); err != nil {
+				return 1, err
+			}
+		}
 	}
 	home, err := resolveHome()
 	if err != nil {
@@ -164,7 +178,13 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 
 	stdout := &lineWriter{local: config.Stdout, stream: "stdout", publish: publish, onError: cancelWork}
 	stderr := &lineWriter{local: config.Stderr, stream: "stderr", publish: publish, onError: cancelWork}
-	command := exec.Command("/bin/bash", "-c", shellSetup, "bec-slurm-worker", activation, script)
+	shellArgs := []string{"-c", shellSetup, "bec-slurm-worker", activation}
+	if config.RunCommand {
+		shellArgs = append(shellArgs, "-c", payload.Script, "bec-slurm-worker")
+	} else {
+		shellArgs = append(shellArgs, "--", script)
+	}
+	command := exec.Command("/bin/bash", shellArgs...)
 	command.Env = append(os.Environ(), "HOME="+home, "SLURM_WORKER_JOBID="+config.JobID)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdout, command.Stderr = stdout, stderr
