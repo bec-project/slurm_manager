@@ -21,7 +21,9 @@ from uuid import uuid4
 
 import pytest
 
+from slurm_manager.clusters import Cluster
 from slurm_manager.clusters.job_options import JobOptions
+from slurm_manager.clusters.ra import RAJobOptions
 from slurm_manager.event_messages import HeartBeatMessage, LogMessage, SlurmMessage, StatusMessage
 from slurm_manager.job_future import JobFuture
 from slurm_manager.slurm_manager import SlurmManager
@@ -34,7 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_ra_modules(tmp_path: Path) -> None:
-    """Verify module activation and module commands inside the remote workload.
+    """Verify module activation and workload commands using the built-in RA profile.
 
     Args:
         tmp_path (Path): Local directory for uploaded activation and workload files.
@@ -58,8 +60,9 @@ def test_ra_modules(tmp_path: Path) -> None:
         "gcc -dumpfullversion\n"
     )
     lines: list[str] = []
-    manager = SlurmManager(
-        redis_host=os.environ.get("SLURM_RA_REDIS", "bec-slurm.psi.ch"),
+    manager = SlurmManager.for_cluster(
+        Cluster.RA,
+        env_file=".env",
         worker_path=os.environ.get("SLURM_RA_WORKER", f"{remote_home}/slurm-worker"),
     )
     job = None
@@ -73,7 +76,7 @@ def test_ra_modules(tmp_path: Path) -> None:
                     lines.append(message.log) if isinstance(message, LogMessage) else None
                 )
             },
-            job_options=JobOptions(
+            job_options=RAJobOptions(
                 name="smoke-modules",
                 partition="hour",
                 tasks=1,
