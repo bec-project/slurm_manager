@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from functools import partial
@@ -45,7 +46,7 @@ def manager():
 
 def submit(manager):
     return manager.submit_job(
-        Path(__file__).parent.parent / "examples/print_for_10s.sh",
+        script_path=Path(__file__).parent.parent / "examples/print_for_10s.sh",
         working_directory="/remote/node/work",
     )
 
@@ -400,7 +401,12 @@ def test_local_files_are_uploaded_without_mutating_options(manager, tmp_path):
     workload.write_text("#!/bin/bash\nprintf 'hello'\n")
     activation.write_text("module load redis\n")
     options = JobOptions(partition="hour", tasks=2, time_limit=5)
-    manager.submit_job(workload, activation, working_directory="/remote/work", job_options=options)
+    manager.submit_job(
+        script_path=workload,
+        env_path=activation,
+        working_directory="/remote/work",
+        job_options=options,
+    )
     script, job = manager.rest_client.submit.call_args.args
     assert "hello" in script
     assert "module load redis" in script
@@ -412,6 +418,22 @@ def test_local_files_are_uploaded_without_mutating_options(manager, tmp_path):
     assert job["time_limit"] == {"set": True, "number": 5}
 
 
+def test_command_submission_passes_text_to_worker(manager):
+    manager.submit_job(command="printf 'hello world\\n'", working_directory="/remote/work")
+
+    script, _ = manager.rest_client.submit.call_args.args
+    assert "--command" in script.splitlines()[1]
+    payload = json.loads(script.splitlines()[2])
+    assert payload["script"] == "printf 'hello world\\n'"
+
+
+@pytest.mark.parametrize("workload", [{}, {"command": "true", "script_path": "unused.sh"}])
+def test_submission_requires_exactly_one_workload(manager, workload):
+    with pytest.raises(ValueError, match="Specify exactly one"):
+        manager.submit_job(working_directory="/remote/work", **workload)
+    manager.rest_client.submit.assert_not_called()
+
+
 @pytest.mark.parametrize("tasks", [None, 1, 8])
 def test_submission_preserves_explicit_tasks_for_per_node_layout(manager, tasks):
     options = (
@@ -421,7 +443,9 @@ def test_submission_preserves_explicit_tasks_for_per_node_layout(manager, tasks)
     )
 
     manager.submit_job(
-        "examples/print_for_10s.sh", working_directory="/remote/work", job_options=options
+        script_path="examples/print_for_10s.sh",
+        working_directory="/remote/work",
+        job_options=options,
     )
 
     _, job = manager.rest_client.submit.call_args.args
@@ -440,7 +464,9 @@ def test_dependency_futures_use_scheduler_job_ids(manager, argument, kind, multi
     first = submit(manager)
     upstream = [first, submit(manager)] if multiple else first
     manager.submit_job(
-        "examples/print_for_10s.sh", working_directory="/remote/work", **{argument: upstream}
+        script_path="examples/print_for_10s.sh",
+        working_directory="/remote/work",
+        **{argument: upstream},
     )
     _, job = manager.rest_client.submit.call_args.args
     assert job["dependency"] == (f"{kind}:123:456" if multiple else f"{kind}:123")
@@ -449,7 +475,7 @@ def test_dependency_futures_use_scheduler_job_ids(manager, argument, kind, multi
 
 def test_raw_dependency_requests_cancellation_if_it_can_never_be_satisfied(manager):
     manager.submit_job(
-        "examples/print_for_10s.sh",
+        script_path="examples/print_for_10s.sh",
         working_directory="/remote/work",
         job_options=JobOptions(dependency="afterok:123,afterany:456"),
     )
@@ -464,7 +490,7 @@ def test_dependency_futures_reject_a_raw_dependency(manager, argument):
     manager.rest_client.submit.reset_mock()
     with pytest.raises(ValueError, match=f"either {argument} or job_options.dependency"):
         manager.submit_job(
-            "examples/print_for_10s.sh",
+            script_path="examples/print_for_10s.sh",
             working_directory="/remote/work",
             job_options=JobOptions(dependency="afterany:123"),
             **{argument: upstream},
@@ -481,7 +507,7 @@ def test_dependencies_require_futures_from_this_manager(manager, argument):
     for upstream in (foreign_job, [issued, copied_job], []):
         with pytest.raises(ValueError, match="futures returned by this manager"):
             manager.submit_job(
-                "examples/print_for_10s.sh",
+                script_path="examples/print_for_10s.sh",
                 working_directory="/remote/work",
                 **{argument: upstream},
             )
@@ -495,7 +521,7 @@ def test_dependencies_accept_completed_futures_from_this_manager(manager):
     assert manager._job_tracker.get_future(upstream._job_id) is None
 
     manager.submit_job(
-        "examples/print_for_10s.sh", working_directory="/remote/work", after_ok=upstream
+        script_path="examples/print_for_10s.sh", working_directory="/remote/work", after_ok=upstream
     )
     _, job = manager.rest_client.submit.call_args.args
     assert job["dependency"] == "afterok:123"
@@ -508,7 +534,7 @@ def test_combines_after_ok_and_after_any(manager):
     prepare, calibrate, monitor = (submit(manager) for _ in range(3))
 
     manager.submit_job(
-        "examples/print_for_10s.sh",
+        script_path="examples/print_for_10s.sh",
         working_directory="/remote/work",
         after_ok=[prepare, calibrate],
         after_any=monitor,
@@ -539,7 +565,9 @@ def test_cancellation_failure_keeps_monitoring(manager):
 
 def test_relative_remote_paths_are_rejected_before_submission(manager):
     with pytest.raises(ValueError, match="absolute"):
-        manager.submit_job("workload.sh", "activate.sh", working_directory="relative")
+        manager.submit_job(
+            script_path="workload.sh", env_path="activate.sh", working_directory="relative"
+        )
     manager.rest_client.submit.assert_not_called()
 
 
@@ -555,7 +583,7 @@ def test_public_callbacks_are_ready_before_release(manager):
 
     manager.rest_client.release.side_effect = release
     manager.submit_job(
-        "examples/print_for_10s.sh",
+        script_path="examples/print_for_10s.sh",
         working_directory="/remote/work",
         callbacks={"log": lambda _: received.set()},
     )
@@ -733,7 +761,7 @@ def test_cluster_redis_transport_reaches_subscriber_and_worker(tmp_path, monkeyp
             expected.update(ssl=True, ssl_cert_reqs="required", ssl_check_hostname=True)
         ctor.assert_called_once_with(**expected)
         with mock.patch.object(manager._job_tracker, "wait_until_ready"):
-            manager.submit_job(workload, working_directory="/remote/work")
+            manager.submit_job(script_path=workload, working_directory="/remote/work")
         script = rest.submit.call_args.args[0]
         assert "--redis-address redis.example:6380" in script
         assert f"--redis-tls={str(tls).lower()}" in script
@@ -800,7 +828,7 @@ def test_factory_binds_endpoint_credentials_and_partition_validation(
         with mock.patch.object(client, "submit") as submit_rest:
             with pytest.raises(ValidationError, match="partition"):
                 manager.submit_job(
-                    "examples/print_for_10s.sh",
+                    script_path="examples/print_for_10s.sh",
                     working_directory="/remote/work",
                     job_options=invalid_options,
                 )

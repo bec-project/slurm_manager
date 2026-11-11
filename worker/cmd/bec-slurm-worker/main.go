@@ -1,4 +1,4 @@
-// bec-slurm-worker executes one uploaded Bash workload and forwards feedback to Redis.
+// bec-slurm-worker executes one Bash workload and forwards feedback to Redis.
 package main
 
 import (
@@ -20,6 +20,7 @@ func main() {
 	redisTLS := flag.Bool("redis-tls", true, "Use TLS with certificate and hostname verification")
 	heartbeat := flag.Duration("heartbeat", time.Second, "Heartbeat interval")
 	grace := flag.Duration("grace", 5*time.Second, "Time to terminate workload before killing it")
+	runCommand := flag.Bool("command", false, "Execute the payload as Bash command text")
 	flag.Parse()
 	if *heartbeat <= 0 || *grace <= 0 || flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "Positive timing values are required; payload is JSON on stdin")
@@ -39,7 +40,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	code, err := worker.Run(ctx, worker.Config{
 		JobID: payload.JobID, HeartbeatInterval: *heartbeat, GracePeriod: *grace,
-		Stdout: os.Stdout, Stderr: os.Stderr,
+		Stdout: os.Stdout, Stderr: os.Stderr, RunCommand: *runCommand,
 	}, payload, publisher)
 	stop()
 	_ = publisher.Close()

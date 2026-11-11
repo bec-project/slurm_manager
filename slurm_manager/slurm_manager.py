@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import shlex
 import threading
 from collections.abc import Callable, Sequence
@@ -201,9 +202,11 @@ class SlurmManager(Generic[_JobOptionsT]):
 
     def submit_job(  # noqa: PLR0913 - submission options
         self,
-        script_path: str | Path,
-        env_path: str | Path | None = None,
         *,
+        command: str | None = None,
+        script_path: str | Path | None = None,
+        remote_script_path: str | Path | None = None,
+        env_path: str | Path | None = None,
         working_directory: str,
         job_options: _JobOptionsT | None = None,
         after_ok: JobFuture | Sequence[JobFuture] | None = None,
@@ -211,11 +214,15 @@ class SlurmManager(Generic[_JobOptionsT]):
         callbacks: dict[Literal["log", "status", "heartbeat"], Callable[[SlurmMessage], None]]
         | None = None,
     ) -> JobFuture:
-        """Upload local Bash files and return a monitored, released Slurm job.
+        """Submit a Bash workload and return a monitored, released Slurm job.
+
+        Supply exactly one of script_path, command, and remote_script_path.
 
         Args:
-            script_path (str | Path): Local Bash workload file whose contents are
-                uploaded.
+            command (str | None): Bash command text to execute on the compute node.
+            script_path (str | Path | None): Local Bash workload file to upload.
+            remote_script_path (str | Path | None): Bash file accessible on the compute
+                node. Relative paths are resolved from the job's working directory.
             env_path (str | Path | None): Optional local Bash activation file for
                 workload-specific environment setup; None skips activation commands.
             working_directory (str): Absolute, existing compute-node directory in which
@@ -236,8 +243,8 @@ class SlurmManager(Generic[_JobOptionsT]):
 
         Raises:
             FileNotFoundError: A local workload or activation file does not exist.
-            ValueError: The working directory, callback event names, or dependencies
-                are invalid.
+            ValueError: The workload, working directory, callback event names, or
+                dependencies are invalid.
             ValidationError: Resource or output options fail JobOptions validation.
             SlurmRestError: Submission or release fails. A known held job is cancelled
                 on setup failure.
@@ -245,8 +252,8 @@ class SlurmManager(Generic[_JobOptionsT]):
 
         Notes:
             The credential dotenv file stays local. Callbacks are registered before
-            release; only the working directory, worker path, and output paths refer to
-            compute nodes.
+            release. The working directory, worker path, remote script, and output
+            paths refer to compute nodes.
         """
         if not working_directory.startswith("/"):
             raise ValueError("Working directory must be an absolute compute-node path")
@@ -266,9 +273,12 @@ class SlurmManager(Generic[_JobOptionsT]):
             job["flags"] = [*job.get("flags", ()), "KILL_INVALID_DEPENDENCY"]
         job_id = str(uuid4())
         script = self._build_job_script(
-            script_path,
-            env_path,
-            job_id,
+            command=command,
+            script_path=script_path,
+            remote_script_path=remote_script_path,
+            env_path=env_path,
+            working_directory=working_directory,
+            job_id=job_id,
             worker_path=self.worker_path,
             redis_address=self._redis_address,
             redis_tls=self._redis_tls,
@@ -505,20 +515,26 @@ class SlurmManager(Generic[_JobOptionsT]):
 
     @staticmethod
     def _build_job_script(  # noqa: PLR0913 - worker command and TLS configuration
-        script_path: str | Path,
-        env_path: str | Path | None,
-        job_id: str,
         *,
+        command: str | None = None,
+        script_path: str | Path | None = None,
+        remote_script_path: str | Path | None = None,
+        env_path: str | Path | None = None,
+        working_directory: str,
+        job_id: str,
         worker_path: str = "/usr/bin/bec-slurm-worker",
         redis_address: str = "localhost:6379",
         redis_tls: bool = True,
     ) -> str:
-        """Package local Bash file contents for the compute-node Go worker.
+        """Package a Bash workload for the compute-node Go worker.
 
         Args:
-            script_path (str | Path): Local Bash workload file whose contents are uploaded.
+            command (str | None): Bash command text to execute on the compute node.
+            script_path (str | Path | None): Local Bash workload file to upload.
+            remote_script_path (str | Path | None): Bash file accessible on the compute node.
             env_path (str | Path | None): Optional local Bash activation file for
                 workload-specific environment setup; None skips activation commands.
+            working_directory (str): Absolute compute-node directory for relative paths.
             job_id (str): Opaque manager identifier used in Redis topic names.
             worker_path (str): Absolute path to the Go executable on compute nodes.
             redis_address (str): Redis host:port passed to the worker; no credentials are
@@ -530,19 +546,32 @@ class SlurmManager(Generic[_JobOptionsT]):
 
         Raises:
             FileNotFoundError: A local script file is missing.
-            ValueError: The worker path is not an absolute compute-node path.
+            ValueError: The worker path or workload selection is invalid.
 
         Notes:
-            The payload contains the job ID and selected workload and activation scripts,
-            not the credential dotenv file. The job ID is kept out of process arguments.
-            Staging and cleanup belong to the worker.
+            The JSON payload carries the job ID, workload, and activation text.
+            The worker stages uploaded files and cleans them up after execution.
         """
         if not worker_path.startswith("/"):
             raise ValueError("Worker path must be an absolute compute-node path")
+        if sum(source is not None for source in (script_path, command, remote_script_path)) != 1:
+            raise ValueError("Specify exactly one of script_path, command, and remote_script_path")
+        if script_path is not None:
+            workload = Path(script_path).read_text()
+        elif remote_script_path is not None:
+            remote_path = str(remote_script_path)
+            if not remote_path.strip():
+                raise ValueError("remote_script_path must be nonempty")
+            remote_path = posixpath.join(working_directory, remote_path)
+            workload = shlex.join(["exec", "/bin/bash", "--", remote_path])
+        elif command is not None and command.strip():
+            workload = command
+        else:
+            raise ValueError("command must be nonempty")
         payload = json.dumps(
             {
                 "job_id": job_id,
-                "script": Path(script_path).read_text(),
+                "script": workload,
                 "activation": Path(env_path).read_text() if env_path is not None else "",
             }
         )
@@ -553,8 +582,10 @@ class SlurmManager(Generic[_JobOptionsT]):
             redis_address,
             f"--redis-tls={str(redis_tls).lower()}",
         ]
-        command = shlex.join(args)
-        return f"#!/bin/bash\nexec {command} <<'{delimiter}'\n{payload}\n{delimiter}\n"
+        if script_path is None:
+            args.append("--command")
+        worker_command = shlex.join(args)
+        return f"#!/bin/bash\nexec {worker_command} <<'{delimiter}'\n{payload}\n{delimiter}\n"
 
     ################################################
     #  Internal Monitoring                         #
