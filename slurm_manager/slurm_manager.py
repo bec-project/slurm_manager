@@ -310,7 +310,7 @@ class SlurmManager(Generic[_JobOptionsT]):
             except (SlurmRestError, ValueError):
                 logger.error("Could not cancel held job %s", slurm_job_id)
             self._job_tracker.apply_status(
-                StatusMessage(status=f"error:Submission setup failed: {exc}"), job_future
+                StatusMessage(status=f"[ERROR]: Submission setup failed: {exc}"), job_future
             )
             raise
         with self._submitted_futures_lock:
@@ -653,5 +653,5 @@ class SlurmManager(Generic[_JobOptionsT]):
             # A partial accounting record is not proof of failure.
             return
         else:
-            status = f"error:Slurm state {state}, exit code {exit_code}"
+            status = f"[ERROR]: Slurm state {state}, exit code {exit_code}"
         self._job_tracker.apply_status(StatusMessage(status=status), future)

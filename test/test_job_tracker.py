@@ -70,7 +70,15 @@ def test_scheduler_check_skips_a_job_removed_after_snapshot(tracker):
     assert tracker.begin_scheduler_check("unknown") is None
 
 
-@pytest.mark.parametrize("status", ["finished", "cancelled", "error:workload failed", "unknown"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        "finished",
+        "cancelled",
+        "[ERROR]: workload exited with code 7\nstderr (tail):\nInput file not found\n",
+        "unknown",
+    ],
+)
 def test_synthesized_terminal_status_notifies_listeners_once(tracker, status):
     future = JobFuture("first", manager=mock.Mock(spec=SlurmManager), slurm_job_id="123")
     tracker.track(future)
@@ -89,8 +97,19 @@ def test_synthesized_terminal_status_notifies_listeners_once(tracker, status):
     assert len(received) == 1
     assert received[0].metadata["job_id"] == "first"
     assert received[0].metadata["slurm_job_id"] == "123"
-    assert received[0].status == status or received[0].status.startswith("error:")
+    if status == "unknown":
+        assert received[0].status.startswith("[ERROR]: Received unknown job status 'unknown'")
+    else:
+        assert received[0].status == status
     assert future.done()
+    if status.startswith("[ERROR]: "):
+        with pytest.raises(Exception) as exc_info:
+            future.wait()
+        assert str(exc_info.value) == (
+            "Job-123 failed with status error. Exception info: workload exited with code 7\n"
+            "stderr (tail):\n"
+            "Input file not found\n"
+        )
 
 
 def test_redis_status_is_dispatched_once_and_shutdown_drains_it(tracker):
@@ -118,7 +137,7 @@ def test_removing_tracking_reports_failure_to_status_listeners(tracker):
     tracker.shutdown(timeout=3)
 
     assert len(received) == 1
-    assert received[0].status.startswith("error:Removal requested by user")
+    assert received[0].status.startswith("[ERROR]: Removal requested by user")
     assert tracker.get_future("first") is None
     assert tracker._sub_client.registered_topics == set()
 

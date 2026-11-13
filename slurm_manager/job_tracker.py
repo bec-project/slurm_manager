@@ -191,12 +191,14 @@ class JobTracker:
             same cleanup path as an explicit error.
         """
         info = message.status.split(":", 1)
+        if info[0] == "[ERROR]":
+            info[0] = JobStatus.ERROR.value
         try:
             status = JobStatus(info[0])
         except ValueError:
             logger.warning("Received unknown job status '%s' for job %s", info[0], future.name)
             detail = f"Received unknown job status '{info[0]}' from message: {message.model_dump()}"
-            message = StatusMessage(status=f"error:{detail}", metadata=message.metadata.copy())
+            message = StatusMessage(status=f"[ERROR]: {detail}", metadata=message.metadata.copy())
             status = JobStatus.ERROR
             info = [status.value, detail]
 
@@ -205,7 +207,7 @@ class JobTracker:
                 return
             topic = TopicInfo(future._job_id).event
             callbacks = list(self._subscriptions_by_topic.get(topic, {}).values())
-            exc_info = info[1] if len(info) > 1 else None
+            exc_info = info[1].lstrip(" ") if len(info) > 1 else None
             future._update_status(status, exc_info)
             # Queue notifications before cleanup or concurrent shutdown can discard them.
             # User code runs on the executor, never on this thread under the state lock.
@@ -439,7 +441,7 @@ class JobTracker:
             if future is not None and not future.done() and not skip_event_callback:
                 self.apply_status(
                     StatusMessage(
-                        status=f"error:Removal requested by user; timestamp {datetime.now().isoformat()}",
+                        status=f"[ERROR]: Removal requested by user; timestamp {datetime.now().isoformat()}",
                         metadata={
                             "msg_received": datetime.now().isoformat(),
                             "job_id": future._job_id,
