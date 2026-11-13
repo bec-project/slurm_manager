@@ -93,7 +93,7 @@ func TestScriptsOutputAndCleanup(t *testing.T) {
 			if code == 0 && status != "finished" {
 				t.Fatal(status)
 			}
-			if code != 0 && !strings.HasPrefix(status, "error:") {
+			if code != 0 && !strings.HasPrefix(status, "[ERROR]:") {
 				t.Fatal(status)
 			}
 		})
@@ -116,7 +116,7 @@ exit 7`,
 	if code != 7 || err == nil || out.String() != "from activation" {
 		t.Fatalf("exit=%d err=%v stdout=%q stderr=%q", code, err, out.String(), errout.String())
 	}
-	if status := lastStatus(t, publisher); !strings.HasPrefix(status, "error:") {
+	if status := lastStatus(t, publisher); !strings.HasPrefix(status, "[ERROR]:") {
 		t.Fatalf("status=%q", status)
 	}
 }
@@ -187,8 +187,22 @@ func TestActivationFailureIsReported(t *testing.T) {
 	if code != 9 || out.Len() != 0 {
 		t.Fatalf("%d %s", code, out.String())
 	}
-	if lastStatus(t, p) != "error:workload exited with code 9" {
+	if lastStatus(t, p) != "[ERROR]: workload exited with code 9" {
 		t.Fatal("wrong status")
+	}
+}
+func TestWorkloadFailureIncludesBoundedStderr(t *testing.T) {
+	var out, errout bytes.Buffer
+	p := &fakePublisher{}
+	code, _ := Run(context.Background(), config(&out, &errout), Payload{
+		Script: "printf 'stdout only\\n'; printf 'old stderr\\n%9000s\\nlast error' '' >&2; exit 7\n",
+	}, p)
+	if code != 7 || !strings.HasPrefix(errout.String(), "old stderr\n") {
+		t.Fatalf("exit=%d or missing archived stderr", code)
+	}
+	want := "[ERROR]: workload exited with code 7\nstderr (tail):\n" + errout.String()[errout.Len()-8*1024:]
+	if lastStatus(t, p) != want {
+		t.Fatal("failure status did not include the last 8 KiB of stderr")
 	}
 }
 func TestInitialRedisFailureDoesNotRunWorkload(t *testing.T) {
@@ -214,7 +228,7 @@ func TestLogFailureStopsWorkload(t *testing.T) {
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("workload continued after feedback failed")
 	}
-	if lastStatus(t, p) != "error:Redis feedback failed" {
+	if lastStatus(t, p) != "[ERROR]: Redis feedback failed" {
 		t.Fatal("wrong status")
 	}
 }
@@ -339,7 +353,7 @@ func TestRedisFailureSkipsRemainingBufferedPublications(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("made %d network publications after feedback failed", attempts)
 	}
-	if lastStatus(t, &publisher.fakePublisher) != "error:Redis feedback failed" {
+	if lastStatus(t, &publisher.fakePublisher) != "[ERROR]: Redis feedback failed" {
 		t.Fatal("missing terminal failure")
 	}
 }
@@ -364,7 +378,7 @@ func TestArchiveWriteFailuresFailTheJob(t *testing.T) {
 			if code != 1 || !errors.Is(err, expected) {
 				t.Fatalf("code=%d err=%v", code, err)
 			}
-			if lastStatus(t, publisher) != "error:Slurm output write failed" {
+			if lastStatus(t, publisher) != "[ERROR]: Slurm output write failed" {
 				t.Fatal("archive failure reported as success")
 			}
 		})
