@@ -136,6 +136,13 @@ does not cancel the job automatically, so the example explicitly calls
 `job.cancel()`. `manager.shutdown()` disconnects without cancelling jobs.
 Callbacks support `log`, `status`, and `heartbeat` and are attached before execution.
 
+Failure status messages start with `[ERROR]: `. If the worker can report the
+failure, it includes up to the last 8 KiB of workload stderr under
+`stderr (tail):` when stderr is available. Status callbacks receive the full
+message, and the exception raised by `job.wait()` includes the failure detail
+and stderr tail. If the worker dies before it can report, the manager can
+report the failure from Slurm's job record.
+
 `manager.listen("log", callback)` registers a callback for **all current and future
 jobs**, even when called before the first submission. Pass the returned IDs to
 `manager.unlisten(callback_ids)` to stop listening. Use `job.listen()` or pass

@@ -177,7 +177,10 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 	}()
 
 	stdout := &lineWriter{local: config.Stdout, stream: "stdout", publish: publish, onError: cancelWork}
-	stderr := &lineWriter{local: config.Stderr, stream: "stderr", publish: publish, onError: cancelWork}
+	stderr := &lineWriter{
+		local: config.Stderr, stream: "stderr", publish: publish, onError: cancelWork,
+		tail: make([]byte, 0, 8*1024),
+	}
 	shellArgs := []string{"-c", shellSetup, "bec-slurm-worker", activation}
 	if config.RunCommand {
 		shellArgs = append(shellArgs, "-c", payload.Script, "bec-slurm-worker")
@@ -229,17 +232,26 @@ func Run(ctx context.Context, config Config, payload Payload, publisher Publishe
 		if errors.As(runError, &exitError) && exitError.ExitCode() > 0 {
 			code = exitError.ExitCode()
 		}
-		status = fmt.Sprintf("error:workload exited with code %d", code)
+		status = fmt.Sprintf("[ERROR]: workload exited with code %d", code)
 	}
 	outputError := errors.Join(stdout.err, stderr.err)
 	if outputError != nil {
-		code, status = 1, "error:Slurm output write failed"
+		code, status = 1, "[ERROR]: Slurm output write failed"
 	}
 	publishLock.Lock()
 	failure := publishError
 	publishLock.Unlock()
 	if failure != nil {
-		code, status = 1, "error:Redis feedback failed"
+		code, status = 1, "[ERROR]: Redis feedback failed"
+	}
+	if strings.HasPrefix(status, "[ERROR]:") && len(stderr.tail) > 0 {
+		tail := stderr.tail
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+		if len(tail) > 0 {
+			status += "\nstderr (tail):\n" + string(tail)
+		}
 	}
 	terminalError := publish("status", map[string]any{"status": status})
 	if failure != nil {
@@ -301,6 +313,7 @@ type lineWriter struct {
 	local   io.Writer
 	stream  string
 	buffer  []byte
+	tail    []byte // Optional bounded tail for failure status messages.
 	publish func(string, map[string]any) error
 	onError func()
 	err     error
@@ -311,6 +324,12 @@ const maxChunk = 64 * 1024
 func (w *lineWriter) Write(data []byte) (int, error) {
 	if w.err != nil {
 		return 0, w.err
+	}
+	if limit := cap(w.tail); limit > 0 {
+		recent := data[max(0, len(data)-limit):]
+		drop := max(0, len(w.tail)+len(recent)-limit)
+		w.tail = w.tail[:copy(w.tail, w.tail[drop:])]
+		w.tail = append(w.tail, recent...)
 	}
 	written, err := w.local.Write(data)
 	if err == nil && written != len(data) {
