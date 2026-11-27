@@ -859,3 +859,66 @@ def test_online_job_options_accept_allowed_partitions(options_type, partition):
 )
 def test_online_job_options_send_cluster_default_partition(options_type, default_partition):
     assert options_type().to_rest()["partition"] == default_partition
+
+
+def test_set_credentials_preserves_active_job_and_subscriptions(manager):
+    future = submit(manager)
+    topics = manager.sub_client.registered_topics
+    manager.set_credentials(username="beamline", token="replacement-token")
+    manager.rest_client.set_credentials.assert_called_once_with(
+        username="beamline", token="replacement-token"
+    )
+    assert manager._job_tracker.get_future(future._job_id) is future
+    assert manager.sub_client.registered_topics == topics
+    manager.sub_client._redis.publish(
+        TopicInfo(future._job_id).event, '{"msg_type":"status","status":"finished"}'
+    )
+    future.wait(timeout=1)
+    assert future.success()
+
+
+def test_explicit_credentials_reach_injected_rest_client():
+    rest = mock.Mock(spec=SlurmRestClient)
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient"):
+        manager = SlurmManager(rest_client=rest, username="beamline", token="initial-token")
+    try:
+        rest.set_credentials.assert_called_once_with(username="beamline", token="initial-token")
+    finally:
+        manager.shutdown(timeout=3)
+
+
+def test_constructor_forwards_explicit_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLURM_REST_URL", "https://slurm.example")
+    monkeypatch.delenv("SLURM_JWT", raising=False)
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient"):
+        manager = SlurmManager(
+            env_file=tmp_path / "missing.env", username="beamline", token="initial-token"
+        )
+    try:
+        assert (
+            manager.rest_client._authentication_headers()["X-SLURM-USER-TOKEN"] == "initial-token"
+        )
+        assert manager.rest_client._authentication_headers()["X-SLURM-USER-NAME"] == "beamline"
+    finally:
+        manager.shutdown(timeout=3)
+
+
+@pytest.mark.parametrize("cluster", ["ra", "sfonline", "slsonline"])
+def test_cluster_factory_accepts_credentials_without_dotenv(monkeypatch, tmp_path, cluster):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SLURM_JWT", "other-token")
+    monkeypatch.setenv("SLURM_USER", "other-user")
+    with mock.patch("slurm_manager.slurm_manager.RedisSubClient"):
+        manager = SlurmManager.for_cluster(cluster, username="beamline", token="initial-token")
+    try:
+        assert (
+            manager.rest_client._authentication_headers()["X-SLURM-USER-TOKEN"] == "initial-token"
+        )
+        assert manager.rest_client._authentication_headers()["X-SLURM-USER-NAME"] == "beamline"
+        manager.set_credentials(username="beamline", token="replacement-token")
+        assert (
+            manager.rest_client._authentication_headers()["X-SLURM-USER-TOKEN"]
+            == "replacement-token"
+        )
+    finally:
+        manager.shutdown(timeout=3)

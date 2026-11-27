@@ -234,3 +234,86 @@ def test_truncated_responses_raise_a_transport_error(endpoint, error_response):
         patch = mock.patch.object(client._opener, "open", return_value=opened)
     with patch, pytest.raises(SlurmRestError):
         client.get_job("123")
+
+
+def test_explicit_credentials_initialize_without_a_file(endpoint, tmp_path, monkeypatch):
+    env_file, calls, replies = endpoint
+    url = env_file.read_text().splitlines()[0].split("=", 1)[1]
+    monkeypatch.setenv("SLURM_JWT", "environment-token")
+    monkeypatch.setenv("SLURM_USER", "environment-user")
+    client = SlurmRestClient(
+        tmp_path / "missing.env", rest_url=url, username="beamline", token="initial-token"
+    )
+    replies.extend([(200, {}), (200, {}), (200, {})])
+    client.cancel("1")
+    client.set_credentials(username="replacement-user", token="replacement-token")
+    client.cancel("2")
+    client.set_credentials(username=None, token="without-user")
+    client.cancel("3")
+    assert [call[2]["X-Slurm-User-Token"] for call in calls] == [
+        "initial-token",
+        "replacement-token",
+        "without-user",
+    ]
+    assert calls[0][2]["X-Slurm-User-Name"] == "beamline"
+    assert calls[1][2]["X-Slurm-User-Name"] == "replacement-user"
+    assert "X-Slurm-User-Name" not in calls[2][2]
+
+
+def test_set_credentials_overrides_dotenv_and_environment(endpoint, monkeypatch):
+    env_file, calls, replies = endpoint
+    client = SlurmRestClient(env_file)
+    client.set_credentials(username="beamline", token="explicit-token")
+    monkeypatch.setenv("SLURM_JWT", "environment-token")
+    env_file.write_text(env_file.read_text().replace("test-secret", "file-token"))
+    replies.append((200, {}))
+    client.cancel("1")
+    assert calls[0][2]["X-Slurm-User-Token"] == "explicit-token"
+    assert calls[0][2]["X-Slurm-User-Name"] == "beamline"
+
+
+@pytest.mark.parametrize(
+    ("username", "token"),
+    [("beamline", ""), ("beamline", "  "), ("beamline", "bad\r\ntoken"), ("bad\nuser", "token")],
+)
+def test_invalid_rotation_preserves_previous_credentials(endpoint, username, token):
+    env_file, calls, replies = endpoint
+    client = SlurmRestClient(env_file, username="valid-user", token="valid-token")
+    with pytest.raises(ValueError):
+        client.set_credentials(username=username, token=token)
+    replies.append((200, {}))
+    client.cancel("1")
+    assert calls[0][2]["X-Slurm-User-Name"] == "valid-user"
+    assert calls[0][2]["X-Slurm-User-Token"] == "valid-token"
+
+
+def test_rotation_during_request_keeps_consistent_snapshot(endpoint, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    env_file, calls, replies = endpoint
+    client = SlurmRestClient(env_file, username="old-user", token="old-token")
+    snapshot_taken = threading.Event()
+    continue_request = threading.Event()
+    original_headers = client._headers
+
+    def headers(settings):
+        if threading.current_thread() is not threading.main_thread():
+            snapshot_taken.set()
+            assert continue_request.wait(timeout=2)
+        return original_headers(settings)
+
+    monkeypatch.setattr(client, "_headers", headers)
+    replies.extend([(200, {}), (200, {})])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(client.cancel, "1")
+        try:
+            assert snapshot_taken.wait(timeout=2)
+            client.set_credentials(username="new-user", token="new-token")
+        finally:
+            continue_request.set()
+        request.result(timeout=2)
+    client.cancel("2")
+    assert [(call[2]["X-Slurm-User-Name"], call[2]["X-Slurm-User-Token"]) for call in calls] == [
+        ("old-user", "old-token"),
+        ("new-user", "new-token"),
+    ]
