@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v1.3.0 (2026-11-27)
+
+### Features
+
+- Include stderr tail in Slurm failure status
+  ([`3673310`](https://github.com/bec-project/slurm_manager/commit/3673310844cb0302eb609e27df6966860fb032b2))
+
+
 ## v1.2.0 (2026-11-11)
 
 ### Features
