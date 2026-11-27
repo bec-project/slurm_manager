@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v1.4.0 (2026-11-27)
+
+### Features
+
+- Support updating Slurm credentials at runtime
+  ([`377d211`](https://github.com/bec-project/slurm_manager/commit/377d211b5c709c0cc326d0fcb0e745556d874a2a))
+
+
 ## v1.3.0 (2026-11-27)
 
 ### Features
