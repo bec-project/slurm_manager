@@ -28,6 +28,24 @@ When constructing a manager directly, pass `redis_port` for a non-default
 listener port or `redis_tls=False` for a local plaintext Redis server.
 The standalone worker likewise defaults to TLS; use `--redis-tls=false` for plaintext.
 
+## Credentials supplied by an application
+
+An application can supply credentials directly without a dotenv file:
+
+```python
+manager = SlurmManager.for_cluster(Cluster.RA, username=username, token=token)
+# When the application receives a refreshed token:
+manager.set_credentials(username=username, token=refreshed_token)
+```
+
+Import `SlurmManager` and `Cluster` as in the example below. Explicit credentials
+are kept in memory and take precedence over dotenv and environment credentials.
+Updates apply to subsequent REST requests, including background monitoring and
+cancellation, without replacing active jobs or event subscriptions. A request
+already in progress retains its original credentials. Pass `username=None` when
+no user-name header is needed. The application is responsible for acquiring and
+refreshing tokens; keep them out of logs and job payloads.
+
 ## Simple job
 
 Run the included ten-second Bash script using the cluster's default resources:

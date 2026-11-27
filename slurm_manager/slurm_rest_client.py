@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from http import HTTPStatus
 from http.client import HTTPException
 from pathlib import Path
@@ -62,9 +63,10 @@ class SlurmRestClient:
 
     Environment variables override the file. The file is read again for every
     request so replacing an expired token does not require restarting a manager.
+    Explicit credentials take precedence over the file and environment.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - REST connection and authentication configuration
         self,
         env_file: str | Path = ".env",
         timeout: float = 30,
@@ -72,6 +74,8 @@ class SlurmRestClient:
         rest_url: str | None = None,
         api_version: str | None = None,
         use_environment: bool = True,
+        username: str | None = None,
+        token: str | None = None,
     ) -> None:
         """Load and validate slurmrestd connection settings.
 
@@ -82,10 +86,18 @@ class SlurmRestClient:
             rest_url: Explicit endpoint, overriding connection settings from dotenv or environment.
             api_version: Explicit REST version.
             use_environment: Allow process-wide environment overrides for dotenv values.
+            username (str | None): Explicit Slurm user; None omits the user header.
+            token (str | None): Explicit JWT; None uses dotenv/environment credentials.
 
         Raises:
             ValueError: The URL, API version, token, or timeout is invalid.
         """
+        self._credentials_lock = threading.Lock()
+        self._credentials: tuple[str | None, str] | None = None
+        if token is not None:
+            self.set_credentials(username=username, token=token)
+        elif username is not None:
+            raise ValueError("An explicit username requires an explicit token")
         self.env_file = Path(env_file).resolve()
         if timeout <= 0:
             raise ValueError("REST timeout must be positive")
@@ -105,8 +117,28 @@ class SlurmRestClient:
         )
         if not re.fullmatch(r"v\d+\.\d+\.\d+", self.api_version):
             raise ValueError("SLURM_REST_API_VERSION must look like v0.0.44")
-        self._headers(settings)
+        self._authentication_headers()
         self._opener = build_opener(_NoRedirect())
+
+    def set_credentials(self, *, username: str | None, token: str) -> None:
+        """Atomically replace credentials used by subsequent REST requests.
+
+        Args:
+            username (str | None): Slurm user name; None omits the user header.
+            token (str): Nonempty Slurm JWT, overriding dotenv/environment credentials.
+
+        Raises:
+            ValueError: Credentials are empty or contain invalid header characters.
+
+        Notes:
+            Requests already in progress retain their original credential snapshot.
+            Updating credentials does not interrupt jobs or event subscriptions.
+        """
+        if username is not None and not isinstance(username, str):
+            raise ValueError("Username must be a string or None")
+        self._headers({"SLURM_JWT": token, "SLURM_USER": username or ""})
+        with self._credentials_lock:
+            self._credentials = (username, token)
 
     ################################################
     #  Public Job Operations                       #
@@ -210,7 +242,7 @@ class SlurmRestClient:
             Requests are not automatically retried. Authentication headers and response
             bodies are not included in raised transport errors.
         """
-        headers = self._headers(self._settings())
+        headers = self._authentication_headers()
         data = None if payload is None else json.dumps(payload).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -256,6 +288,15 @@ class SlurmRestClient:
     #  Internal Authentication                     #
     ################################################
 
+    def _authentication_headers(self) -> dict[str, str]:
+        """Build headers from one consistent credential snapshot."""
+        with self._credentials_lock:
+            credentials = self._credentials
+        if credentials is not None:
+            username, token = credentials
+            return self._headers({"SLURM_JWT": token, "SLURM_USER": username or ""})
+        return self._headers(self._settings())
+
     def _settings(self) -> dict[str, str]:
         """Read local dotenv values and apply environment-variable overrides.
 
@@ -285,8 +326,11 @@ class SlurmRestClient:
             ValueError: The token is empty.
         """
         token = settings.get("SLURM_JWT", "")
-        if not token:
+        if not isinstance(token, str) or not token.strip():
             raise ValueError("Set SLURM_JWT in the credential file or enabled environment")
+        for value in (token, settings.get("SLURM_USER", "")):
+            if not isinstance(value, str) or not re.fullmatch(r"[\x20-\x7e]*", value):
+                raise ValueError("Credentials contain invalid HTTP header characters")
         headers = {"X-SLURM-USER-TOKEN": token, "Accept": "application/json"}
         if settings.get("SLURM_USER"):
             headers["X-SLURM-USER-NAME"] = settings["SLURM_USER"]

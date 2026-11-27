@@ -62,6 +62,8 @@ class SlurmManager(Generic[_JobOptionsT]):
         redis_tls: bool = True,
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
         job_options_type: None = None,
     ) -> None: ...
@@ -75,6 +77,8 @@ class SlurmManager(Generic[_JobOptionsT]):
         redis_tls: bool = True,
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
         job_options_type: type[_JobOptionsT],
     ) -> None: ...
@@ -87,6 +91,8 @@ class SlurmManager(Generic[_JobOptionsT]):
         redis_tls: bool = True,
         env_file: str | Path = ".env",
         rest_client: SlurmRestClient | None = None,
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
         job_options_type: type[_JobOptionsT] | None = None,
     ) -> None:
@@ -101,6 +107,8 @@ class SlurmManager(Generic[_JobOptionsT]):
                 take precedence.
             rest_client (SlurmRestClient | None): Optional preconfigured REST client;
                 None creates one from env_file.
+            username (str | None): Explicit Slurm user; None omits the user header.
+            token (str | None): Explicit JWT; None uses the REST client credentials.
             worker_path (str): Absolute path to the Go executable on compute nodes.
             job_options_type: Model used to validate submissions for this manager.
 
@@ -113,7 +121,14 @@ class SlurmManager(Generic[_JobOptionsT]):
         self._redis_tls = redis_tls
         self.worker_path = worker_path
         self._redis_address = f"{redis_host}:{redis_port}"
-        self.rest_client = rest_client if rest_client is not None else SlurmRestClient(env_file)
+        if rest_client is None:
+            self.rest_client = SlurmRestClient(env_file, username=username, token=token)
+        else:
+            self.rest_client = rest_client
+            if token is not None:
+                self.set_credentials(username=username, token=token)
+            elif username is not None:
+                raise ValueError("An explicit username requires an explicit token")
         redis_options = {}
         if redis_tls:
             redis_options = {"ssl": True, "ssl_cert_reqs": "required", "ssl_check_hostname": True}
@@ -133,14 +148,20 @@ class SlurmManager(Generic[_JobOptionsT]):
     def for_cluster(
         cluster: Literal["ra", Cluster.RA],
         *,
-        env_file: str | Path,
+        env_file: str | Path = ".env",
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> SlurmManager[ra.RAJobOptions]: ...
 
     @overload
     @staticmethod
     def for_cluster(
-        *, env_file: str | Path, worker_path: str = "/usr/bin/bec-slurm-worker"
+        *,
+        env_file: str | Path = ".env",
+        username: str | None = None,
+        token: str | None = None,
+        worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> SlurmManager[ra.RAJobOptions]: ...
 
     @overload
@@ -148,7 +169,9 @@ class SlurmManager(Generic[_JobOptionsT]):
     def for_cluster(
         cluster: Literal["sfonline", "SFOnline", Cluster.SFONLINE],
         *,
-        env_file: str | Path,
+        env_file: str | Path = ".env",
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> SlurmManager[sfonline.SFOnlineJobOptions]: ...
 
@@ -157,7 +180,9 @@ class SlurmManager(Generic[_JobOptionsT]):
     def for_cluster(
         cluster: Literal["slsonline", "SLSOnline", Cluster.SLSONLINE],
         *,
-        env_file: str | Path,
+        env_file: str | Path = ".env",
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> SlurmManager[slsonline.SLSOnlineJobOptions]: ...
 
@@ -165,10 +190,23 @@ class SlurmManager(Generic[_JobOptionsT]):
     def for_cluster(
         cluster: str = Cluster.RA,
         *,
-        env_file: str | Path,
+        env_file: str | Path = ".env",
+        username: str | None = None,
+        token: str | None = None,
         worker_path: str = "/usr/bin/bec-slurm-worker",
     ) -> SlurmManager[Any]:
-        """Create a manager bound to a built-in cluster using a local credential file."""
+        """Create a cluster manager using explicit or local dotenv credentials.
+
+        Args:
+            cluster (str): Built-in cluster name; defaults to RA.
+            env_file (str | Path): Local credential file when token is not supplied.
+            username (str | None): Explicit Slurm user; None omits the user header.
+            token (str | None): Explicit JWT; None uses local dotenv credentials.
+            worker_path (str): Absolute compute-node worker executable path.
+
+        Returns:
+            SlurmManager[Any]: Manager configured for the selected cluster.
+        """
         options_type: type[JobOptions]
         match cluster:
             case Cluster.RA:
@@ -185,7 +223,12 @@ class SlurmManager(Generic[_JobOptionsT]):
                     f"Unknown Slurm cluster {cluster!r}; supported clusters: ra, sfonline, slsonline"
                 )
         rest_client = SlurmRestClient(
-            env_file, rest_url=info.url, api_version=info.api_version, use_environment=False
+            env_file,
+            rest_url=info.url,
+            api_version=info.api_version,
+            use_environment=False,
+            username=username,
+            token=token,
         )
         return SlurmManager(
             info.redis_host,
@@ -195,6 +238,18 @@ class SlurmManager(Generic[_JobOptionsT]):
             rest_client=rest_client,
             job_options_type=options_type,
         )
+
+    def set_credentials(self, *, username: str | None, token: str) -> None:
+        """Update REST credentials without replacing jobs or subscriptions.
+
+        Args:
+            username (str | None): Slurm user name; None omits the user header.
+            token (str): Nonempty Slurm JWT overriding dotenv/environment credentials.
+
+        Raises:
+            ValueError: Credentials are empty or contain invalid header characters.
+        """
+        self.rest_client.set_credentials(username=username, token=token)
 
     ################################################
     #  Public Job Management                       #
